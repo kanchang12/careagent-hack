@@ -4,10 +4,11 @@ import time
 import base64
 import json
 import threading
+import requests
 from datetime import datetime
 from pathlib import Path
 
-from flask import Flask, request, jsonify, render_template, send_from_directory, Response
+from flask import Flask, request, jsonify, render_template, send_from_directory
 from dotenv import load_dotenv
 from PIL import Image
 from google import genai
@@ -21,16 +22,14 @@ app.secret_key = os.getenv("FLASK_SECRET", "care-agent-v1")
 UPLOAD_DIR = Path("static/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-# Auth & Config
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL") # Alias for latest Flash
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 
 ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 twilio_client = TwilioClient(TWILIO_SID, TWILIO_TOKEN) if (TWILIO_SID and TWILIO_TOKEN) else None
 
-# In-Memory Database for Demo
 alerts = {}            
 alerts_lock = threading.Lock()
 events_feed = []       
@@ -41,28 +40,37 @@ def push_feed(entry):
         events_feed.insert(0, entry)
         del events_feed[100:]
 
-# --- TOOL EXECUTORS (The Mechanical Arms) ---
-
-def tool_send_whatsapp(message, image_path=None):
-    if not twilio_client: return False
+def tool_send_whatsapp(message):
+    token = os.getenv("META_WHATSAPP_TOKEN")
+    phone_id = os.getenv("META_PHONE_NUMBER_ID")
+    to_number = os.getenv("FAMILY_WHATSAPP_TO")
+    
+    if not token or not phone_id: 
+        return False
+        
+    url = f"https://graph.facebook.com/v19.0/{phone_id}/messages"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_number,
+        "type": "text",
+        "text": {"body": f"🚨 Care Agent Alert\n{message}\nPlease check the dashboard."}
+    }
+    
     try:
-        twilio_client.messages.create(
-            from_=os.getenv("TWILIO_WHATSAPP_FROM"),
-            body=f"🚨 Care Agent Alert\n{message}",
-            to=os.getenv("FAMILY_WHATSAPP_TO")
-        )
-        return True
+        response = requests.post(url, headers=headers, json=payload)
+        return response.status_code in [200, 201]
     except Exception as e:
-        print(f"[WhatsApp Error] {e}")
+        print(f"[Meta WhatsApp Exception] {e}")
         return False
 
 def tool_send_voice_call(reason):
     if not twilio_client: return False
     try:
-        twiml = (
-            f"<Response><Say voice='alice'>Emergency Alert. Assessment: {reason}. "
-            f"Please check the dashboard immediately.</Say></Response>"
-        )
+        twiml = f"<Response><Say voice='alice'>Emergency Alert. Assessment: {reason}. Please check the dashboard immediately.</Say></Response>"
         twilio_client.calls.create(
             twiml=twiml,
             to=os.getenv("FAMILY_PHONE_TO"),
@@ -73,23 +81,19 @@ def tool_send_voice_call(reason):
         print(f"[Voice Error] {e}")
         return False
 
-# --- WEB VIEWS ---
-
-@app.route("/")
+@app.route("/", methods=["GET", "POST"])
 def patient_view():
     return render_template("patient.html")
 
-@app.route("/dashboard")
+@app.route("/dashboard", methods=["GET", "POST"])
 def dashboard_view():
     return render_template("dashboard.html")
 
-@app.route("/uploads/<path:filename>")
+@app.route("/uploads/<path:filename>", methods=["GET", "POST"])
 def uploaded_file(filename):
     return send_from_directory(UPLOAD_DIR, filename)
 
-# --- THE AGENTIC ORCHESTRATOR ---
-
-@app.route("/api/v1/process-frame",  methods=["POST", "GET"])
+@app.route("/api/v1/process-frame", methods=["GET", "POST"])
 def process_frame():
     data = request.get_json(force=True, silent=True) or {}
     snapshot_b64 = data.get("snapshot")
@@ -102,7 +106,6 @@ def process_frame():
     fname = f"{alert_id}.jpg"
     fpath = UPLOAD_DIR / fname
 
-    # Decode and save image
     try:
         raw_b64 = snapshot_b64.split(",")[1] if "," in snapshot_b64 else snapshot_b64
         image_bytes = base64.b64decode(raw_b64)
@@ -110,20 +113,19 @@ def process_frame():
     except Exception as e:
         return jsonify({"error": f"Image decode failed: {e}"}), 400
 
-    # AGENT PROMPT: Forcing tool selection via JSON schema
     prompt = (
         f"You are an autonomous Care Agent evaluating an elderly patient.\n"
         f"A local edge model detected gesture: '{gesture_input}'.\n"
-        f"Analyze the image for context. Are they falling? Are they safe in a chair? Are they requesting food/water?\n\n"
-        f"Based on the severity, generate an execution plan for your external tools.\n"
+        f"Analyze the image for context. Determine physical safety, posture, and distress.\n"
+        f"Based on severity, generate an execution plan for your tools.\n"
         f"- If gesture is FIST or you see a fall: execute voice_call, whatsapp, and comfort_music.\n"
-        f"- If gesture is WATER/FOOD/TOILET: execute whatsapp, but NO voice call and NO music.\n"
+        f"- If gesture is WATER/FOOD/TOILET: execute whatsapp, NO voice call, NO music.\n"
         f"- If gesture is NONE and scene is safe: execute nothing.\n\n"
         f"Return ONLY valid JSON matching this schema:\n"
         "{\n"
-        '  "assessment": "<factual description of what you see>",\n'
+        '  "assessment": "<factual description>",\n'
         '  "tools_to_execute": {\n'
-        '    "whatsapp_alert": {"execute": true|false, "message": "<short alert text>"},\n'
+        '    "whatsapp_alert": {"execute": true|false, "message": "<short text>"},\n'
         '    "voice_call": {"execute": true|false, "reason": "<urgency reason>"},\n'
         '    "comfort_music": {"execute": true|false}\n'
         '  },\n'
@@ -131,7 +133,6 @@ def process_frame():
         "}"
     )
 
-    # Default fallback plan if API fails
     plan = {
         "assessment": f"Fallback mode. Gesture: {gesture_input}",
         "tools_to_execute": {
@@ -151,14 +152,12 @@ def process_frame():
             )
             plan = json.loads(response.text.strip())
         except Exception as e:
-            print(f"[Gemini Error] Using fallback: {e}")
+            print(f"[Gemini Error] {e}")
 
-    # Determine status
     tools = plan.get("tools_to_execute", {})
     is_emergency = tools.get("voice_call", {}).get("execute", False)
     status = "ESCALATED" if is_emergency else ("PENDING" if tools.get("whatsapp_alert", {}).get("execute", False) else "RESOLVED")
 
-    # Save state
     with alerts_lock:
         alerts[alert_id] = {
             "alert_id": alert_id,
@@ -168,23 +167,18 @@ def process_frame():
             "assessment": plan.get("assessment", ""),
             "image": f"/uploads/{fname}"
         }
-
-    # === EXECUTE THE AGENT'S PLAN ===
     
-    # Tool 1: WhatsApp
     if tools.get("whatsapp_alert", {}).get("execute", False):
         tool_send_whatsapp(tools["whatsapp_alert"].get("message", "Patient needs attention."))
-        push_feed({"time": datetime.utcnow().strftime("%H:%M:%S"), "type": "APP 1", "message": "WhatsApp Dispatched."})
+        push_feed({"time": datetime.utcnow().strftime("%H:%M:%S"), "type": "Meta WhatsApp", "message": "Alert Dispatched."})
         
-    # Tool 2: Twilio Voice
     if is_emergency:
         tool_send_voice_call(tools["voice_call"].get("reason", "Critical alert."))
-        push_feed({"time": datetime.utcnow().strftime("%H:%M:%S"), "type": "APP 2", "message": "Voice Escalation Dialed."})
+        push_feed({"time": datetime.utcnow().strftime("%H:%M:%S"), "type": "Twilio Voice", "message": "Escalation Dialed."})
 
-    # Tool 3: Jamendo Music (URL returned to frontend)
     music_url = "https://prod-1.storage.jamendo.com/?trackid=1890757&format=mp31" if tools.get("comfort_music", {}).get("execute", False) else None
     if music_url:
-        push_feed({"time": datetime.utcnow().strftime("%H:%M:%S"), "type": "APP 3", "message": "Comfort Music Deployed."})
+        push_feed({"time": datetime.utcnow().strftime("%H:%M:%S"), "type": "Jamendo API", "message": "Comfort Music Deployed."})
 
     if status == "RESOLVED":
         push_feed({"time": datetime.utcnow().strftime("%H:%M:%S"), "type": "WATCHDOG", "message": "Routine check safe."})
@@ -196,9 +190,7 @@ def process_frame():
         "play_music_url": music_url
     })
 
-# --- DASHBOARD ENDPOINTS ---
-
-@app.route("/api/v1/acknowledge",  methods=["POST", "GET"])
+@app.route("/api/v1/acknowledge", methods=["GET", "POST"])
 def acknowledge_alert():
     data = request.get_json(force=True, silent=True) or {}
     with alerts_lock:
@@ -206,7 +198,7 @@ def acknowledge_alert():
         if alert: alert["status"] = "RESOLVED"
     return jsonify({"status": "SUCCESS"})
 
-@app.route("/api/v1/state")
+@app.route("/api/v1/state", methods=["GET", "POST"])
 def get_state():
     with alerts_lock:
         active = [a for a in alerts.values() if a["status"] != "RESOLVED"]
