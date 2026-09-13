@@ -252,7 +252,11 @@ def process_frame():
 
     prompt = (
         f"Care agent. Gesture: '{gesture_input}'. Look at image.\n"
-        f"Assessment MUST be under 15 words.\n"
+        f"Assessment MUST be under 15 words.  first and most important look for fixed hand signals\n"
+        f"The patients can't talk so they are told to show hand signals they have no other way to communicate\n"
+        f"YOU MUST at any momemt give proper importance to that -- come what may\n"
+        f"One Fingure  Patient asking for water; two fingers patients asking for food, three fingers patient needs to pee\n"
+        f"fist ;; emergency\n"
         f"FIST or fall → voice_call+whatsapp+music.\n"
         f"WATER/FOOD/TOILET → whatsapp only.\n"
         f"NONE & safe → nothing.\n"
