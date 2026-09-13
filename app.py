@@ -125,28 +125,108 @@ def tool_get_jamendo_music():
         return "https://prod-1.storage.jamendo.com/?trackid=1890757&format=mp31"
 
 
-def tool_send_to_webhook(alert_id, gesture, assessment, raw_b64):
-    webhook_url = os.getenv("MAKE_WEBHOOK_URL")
+def tool_send_to_webhook(
+    alert_id,
+    gesture,
+    assessment,
+    raw_b64,
+    plan=None
+):
+    webhook_url = (os.getenv("MAKE_WEBHOOK_URL") or "").strip()
+
     if not webhook_url:
-        return False
+        app.logger.error("[Make] MAKE_WEBHOOK_URL is missing or empty.")
+        return {
+            "success": False,
+            "error": "MAKE_WEBHOOK_URL is missing"
+        }
+
+    plan = plan or {}
+
     payload = {
+        "event_type": "care_agent_alert",
         "alert_id": alert_id,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp_utc": datetime.utcnow().isoformat() + "Z",
         "gesture": gesture,
         "assessment": assessment,
-        "filename": f"{alert_id}.jpg",
+        "emergency_level": plan.get("emergency_level", "NONE"),
+        "incident_type": plan.get("incident_type", "UNKNOWN"),
+        "details": plan.get("details", ""),
+        "observations": plan.get("observations", []),
+        "confidence": plan.get("confidence", 0),
+        "needs_human_check": bool(
+            plan.get("needs_human_check", False)
+        ),
+        "image_filename": f"{alert_id}.jpg",
+        "image_mime_type": "image/jpeg",
         "image_base64": raw_b64
     }
+
+    safe_url = (
+        webhook_url[:45] + "..."
+        if len(webhook_url) > 45
+        else webhook_url
+    )
+
+    app.logger.info(
+        f"[Make] Posting alert {alert_id} to webhook: {safe_url}"
+    )
+
     try:
-        r = requests.post(webhook_url, json=payload, timeout=5)
-        if r.status_code in [200, 201]:
-            app.logger.info("[Webhook] Sent to Make.com ✅")
-            return True
-        app.logger.error(f"[Webhook Error] {r.text}")
-        return False
-    except Exception as e:
-        app.logger.error(f"[Webhook Exception] {e}")
-        return False
+        response = requests.post(
+            webhook_url,
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "Guardian-Angel-Care-Agent/1.0"
+            },
+            timeout=20
+        )
+
+        app.logger.info(
+            f"[Make] Response for {alert_id}: "
+            f"status={response.status_code}, "
+            f"body={response.text[:1000]!r}"
+        )
+
+        if 200 <= response.status_code < 300:
+            app.logger.info(
+                f"[Make] Webhook accepted successfully for {alert_id}."
+            )
+            return {
+                "success": True,
+                "status_code": response.status_code,
+                "response": response.text[:1000]
+            }
+
+        app.logger.error(
+            f"[Make] Webhook rejected for {alert_id}: "
+            f"HTTP {response.status_code} | {response.text[:1000]}"
+        )
+
+        return {
+            "success": False,
+            "status_code": response.status_code,
+            "error": response.text[:1000]
+        }
+
+    except requests.Timeout:
+        app.logger.error(
+            f"[Make] Timeout sending webhook for {alert_id}."
+        )
+        return {
+            "success": False,
+            "error": "Request timed out"
+        }
+
+    except requests.RequestException as e:
+        app.logger.exception(
+            f"[Make] Network error sending webhook for {alert_id}: {e}"
+        )
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 
 def escalation_ladder(alert_id, message, gesture):
@@ -696,17 +776,26 @@ NO_PATIENT_VISIBLE, SENSOR_UNCLEAR
         })
 
     if gesture_input != "NONE" or needs_alert:
-        tool_send_to_webhook(
-            alert_id,
-            gesture_input,
-            alert_record["assessment"],
-            raw_b64
+        make_result = tool_send_to_webhook(
+            alert_id=alert_id,
+            gesture=gesture_input,
+            assessment=alert_record["assessment"],
+            raw_b64=raw_b64,
+            plan=plan
         )
-
+    
         push_feed({
             "time": datetime.utcnow().strftime("%H:%M:%S"),
             "type": "Make.com",
-            "message": "Incident snapshot and assessment backed up."
+            "message": (
+                "Webhook accepted and incident backed up."
+                if make_result["success"]
+                else (
+                    "Webhook failed: "
+                    f"{make_result.get('status_code', 'network error')} — "
+                    f"{make_result.get('error', 'unknown error')[:120]}"
+                )
+            )
         })
 
     if status == "RESOLVED":
