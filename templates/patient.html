@@ -62,7 +62,7 @@
         .then(stream => {
           video.srcObject = stream;
           initMediaPipe();
-          setInterval(() => { if(!isLocked) dispatchEvent("NONE"); }, 40000);
+          setInterval(() => { if(!isLocked) dispatchEvent("NONE"); }, 10000);
         }).catch(e => log("Camera Error: " + e.message));
     }
 
