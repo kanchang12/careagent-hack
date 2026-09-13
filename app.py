@@ -616,7 +616,7 @@ NO_PATIENT_VISIBLE, SENSOR_UNCLEAR
                 ],
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
-                    response_json_schema=GEMINI_RESPONSE_SCHEMA,
+                    
                     temperature=0.0,
                     max_output_tokens=600
                 )
