@@ -12,7 +12,7 @@
     .btn-danger { background: #ef4444; }
     #log { font-family: monospace; color: #38bdf8; margin-top: 20px; font-size: 0.9rem; }
     .dash-link { display: inline-block; margin-bottom: 15px; color: #38bdf8; text-decoration: none; font-weight: bold; }
-    .dash-link:hover { text-decoration: underline; }
+    .status { font-size: 1.1rem; margin-top: 10px; color: #fbbf24; font-weight: bold; }
   </style>
 </head>
 <body>
@@ -22,6 +22,7 @@
 
   <div class="camera-box"><video id="videoFeed" autoplay playsinline muted></video></div>
   <p>Gestures: 1=Water | 2=Food | 3=Toilet | Fist=EMERGENCY</p>
+  <div class="status" id="statusBox"></div>
 
   <button class="btn" id="startBtn" onclick="initSystem()">Initialize Agent</button>
   <button class="btn btn-danger" id="stopBtn" onclick="stopSystem()" style="display: none;">Stop Agent</button>
@@ -29,13 +30,13 @@
   <div id="log">Waiting to start...</div>
   <audio id="comfortAudio" loop></audio>
 
-  <!-- Version-pinned CDN links -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js" crossorigin="anonymous"></script>
 
   <script>
     const video = document.getElementById('videoFeed');
     const logBox = document.getElementById('log');
+    const statusBox = document.getElementById('statusBox');
     const comfortAudio = document.getElementById('comfortAudio');
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
@@ -44,7 +45,8 @@
     let watchdogInterval = null;
     let activeStream = null;
     let activeCamera = null;
-    let speakerLoop = null;   // <-- 20s repeating speaker interval
+    let speakerLoop = null;
+    let lockUntil = 0;
 
     const VOCAB = {
       "CONFIRM_WATER": "Noted. Your family has been alerted for water.",
@@ -55,6 +57,7 @@
     };
 
     function log(msg) { logBox.innerHTML = `[${new Date().toLocaleTimeString()}] ${msg}<br>` + logBox.innerHTML; }
+    function setStatus(msg) { statusBox.textContent = msg; }
 
     function speak(phrase) {
       if (!window.speechSynthesis) return;
@@ -73,62 +76,72 @@
           activeStream = stream;
           video.srcObject = stream;
           initMediaPipe();
-          watchdogInterval = setInterval(() => { if(!isLocked) dispatchEvent("NONE"); }, 8000);
+          // 8s watchdog
+          watchdogInterval = setInterval(() => {
+            if (!isLocked && Date.now() > lockUntil) dispatchEvent("NONE");
+          }, 8000);
         }).catch(e => log("Camera Error: " + e.message));
     }
 
     function stopSystem() {
-      // 1. Stop background ping
       if (watchdogInterval) clearInterval(watchdogInterval);
-
-      // 2. Stop the emergency speaker loop
       if (speakerLoop) { clearInterval(speakerLoop); speakerLoop = null; }
-
-      // 3. Stop MediaPipe camera loop
       if (activeCamera) activeCamera.stop();
-
-      // 4. Kill the physical webcam feed
-      if (activeStream) {
-        activeStream.getTracks().forEach(track => track.stop());
-      }
+      if (activeStream) activeStream.getTracks().forEach(t => t.stop());
       video.srcObject = null;
-
-      // 5. Halt media and UI
       comfortAudio.pause();
       comfortAudio.currentTime = 0;
       window.speechSynthesis.cancel();
       isLocked = false;
-
+      lockUntil = 0;
       document.getElementById('startBtn').style.display = "inline-block";
       document.getElementById('stopBtn').style.display = "none";
-      log("🛑 Agent sequence stopped. Camera and watchdog offline.");
+      setStatus("");
+      log("🛑 Agent sequence stopped.");
     }
 
-    // --- SPEAKER LOOP: repeats every 20s until caregiver ACKs or 2-min window ends ---
+    // --- 20-second repeating speaker loop with startup grace ---
     function startSpeakerLoop() {
       if (speakerLoop) return;
-      log("🔊 Emergency speaker loop active (every 20s).");
+      log("🔊 Speaker loop active (every 20s).");
+      setStatus("🚨 Emergency — repeating alert");
+
+      const startedAt = Date.now();
+      let missCount = 0;
 
       const tick = async () => {
         try {
           const r = await fetch("/api/v1/patient-loop");
           const d = await r.json();
-          if (!d.speak) {
-            log("✅ Caregiver acknowledged. Speaker loop stopped.");
-            if (speakerLoop) { clearInterval(speakerLoop); speakerLoop = null; }
+
+          if (d.speak) {
+            missCount = 0;
+            speak(d.phrase);
+            log(`🔊 "${d.phrase}" (${d.remaining}s left)`);
             return;
           }
-          speak(d.phrase);
-          log(`🔊 Speaker: "${d.phrase}" (${d.remaining}s left in loop)`);
-        } catch (e) { /* ignore transient errors */ }
+
+          // Ignore speak:false during the first 5s (server-side race guard)
+          if (Date.now() - startedAt < 5000) return;
+
+          // Require two consecutive misses before killing the loop
+          missCount++;
+          if (missCount >= 2) {
+            log("✅ Caregiver acknowledged. Loop stopped.");
+            setStatus("");
+            if (speakerLoop) { clearInterval(speakerLoop); speakerLoop = null; }
+            lockUntil = 0;
+          }
+        } catch (e) { /* ignore */ }
       };
 
-      tick();                                   // speak immediately
-      speakerLoop = setInterval(tick, 20000);   // then every 20 seconds
+      tick();
+      speakerLoop = setInterval(tick, 20000);
     }
 
     async function dispatchEvent(gestureName) {
       if (!video.videoWidth) return;
+      if (Date.now() < lockUntil) { log("⏸ Locked — ignoring frame."); return; }
       canvas.width = 480; canvas.height = 360;
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       const b64 = canvas.toDataURL("image/jpeg", 0.7);
@@ -140,20 +153,22 @@
         });
         const data = await res.json();
 
+        if (data.locked) { log("⏸ Server locked — alert in progress."); return; }
+
         log(`Agent Assessed: ${data.assessment}`);
 
         if (data.play_music_url) {
-            comfortAudio.src = data.play_music_url;
-            comfortAudio.play().catch(e => console.log("Audio block", e));
-            log("🎵 Comfort Music Deployed.");
+          comfortAudio.src = data.play_music_url;
+          comfortAudio.play().catch(e => console.log("Audio block", e));
+          log("🎵 Comfort Music Deployed.");
         } else {
-            comfortAudio.pause();
+          comfortAudio.pause();
         }
 
         if (VOCAB[data.spoken_code]) speak(VOCAB[data.spoken_code]);
 
-        // Kick off the 20s repeating loop whenever an alert was actually raised
         if (data.alert_id && data.spoken_code && data.spoken_code !== "NONE") {
+          lockUntil = Date.now() + 120000;
           startSpeakerLoop();
         }
       } catch (err) { log("API Error"); }
@@ -161,51 +176,45 @@
 
     function initMediaPipe() {
       const hands = new Hands({
-        locateFile: (file) => {
-          return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`;
-        }
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`
       });
-
       hands.setOptions({ maxNumHands: 1, minDetectionConfidence: 0.5 });
 
-      let stable = null;
-      let count = 0;
+      let stable = null, count = 0;
 
       hands.onResults((results) => {
-        if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
-            count = 0;
-            return;
-        }
+        if (Date.now() < lockUntil) { count = 0; return; }
+        if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) { count = 0; return; }
 
         const lm = results.multiHandLandmarks[0];
         let fingers = 0;
-
-        if (lm[8].y < lm[6].y) fingers++;
+        if (lm[8].y  < lm[6].y)  fingers++;
         if (lm[12].y < lm[10].y) fingers++;
         if (lm[16].y < lm[14].y) fingers++;
         if (lm[20].y < lm[18].y) fingers++;
 
-        let gesture = (fingers === 0) ? "FIST" : (fingers <= 3 ? (fingers === 1 ? "WATER" : (fingers === 2 ? "FOOD" : "TOILET")) : "NONE");
+        const gesture = (fingers === 0) ? "FIST"
+                      : (fingers === 1) ? "WATER"
+                      : (fingers === 2) ? "FOOD"
+                      : (fingers === 3) ? "TOILET"
+                      : "NONE";
 
         if (gesture !== "NONE") {
-          if (stable === gesture) {
-              count++;
-          } else {
-              stable = gesture;
-              count = 1;
-          }
+          if (stable === gesture) count++;
+          else { stable = gesture; count = 1; }
           if (count === 5 && !isLocked) {
             isLocked = true;
             log(`🎯 Trigger: ${gesture}`);
             dispatchEvent(gesture);
-            setTimeout(() => { isLocked = false; count=0; }, 5000);
+            setTimeout(() => { isLocked = false; count = 0; }, 5000);
           }
-        } else {
-            count = 0;
-        }
+        } else { count = 0; }
       });
 
-      activeCamera = new Camera(video, { onFrame: async () => { await hands.send({ image: video }); }, width: 640, height: 480 });
+      activeCamera = new Camera(video, {
+        onFrame: async () => { await hands.send({ image: video }); },
+        width: 640, height: 480
+      });
       activeCamera.start();
     }
   </script>
