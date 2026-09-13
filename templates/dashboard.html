@@ -3,66 +3,322 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Care Agent — Dashboard</title>
+  <title>Guardian Angel — Caregiver Dashboard</title>
   <style>
-    body { font-family: sans-serif; background: #f1f5f9; padding: 20px; }
-    .container { max-width: 1000px; margin: auto; display: grid; grid-template-columns: 2fr 1fr; gap: 20px; }
-    .card { background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 15px;}
-    .alert-box { border-left: 5px solid #ef4444; padding: 10px; background: #fef2f2; margin-bottom: 10px; }
-    .btn { background: #10b981; color: white; border: none; padding: 8px 12px; cursor: pointer; border-radius: 4px; }
-    .gallery { display: flex; gap: 10px; overflow-x: auto; }
-    .gallery img { height: 100px; border-radius: 4px; }
-    .feed { font-family: monospace; font-size: 0.85rem; color: #334155; }
-    .patient-link { margin-bottom: 20px; display: inline-block; color: #2563eb; text-decoration: none; font-weight: bold; }
+    * { box-sizing: border-box; }
+    body {
+      background: #0a0f1a; color: #e2e8f0;
+      font-family: system-ui, -apple-system, sans-serif;
+      margin: 0; padding: 0; min-height: 100vh;
+    }
+    header {
+      background: linear-gradient(90deg, #1e293b 0%, #0f172a 100%);
+      padding: 18px 28px; border-bottom: 2px solid #1e293b;
+      display: flex; justify-content: space-between; align-items: center;
+      position: sticky; top: 0; z-index: 100;
+    }
+    header h1 { margin: 0; font-size: 1.4rem; }
+    header h1 .angel { filter: drop-shadow(0 0 10px #38bdf8); }
+    header .links a {
+      color: #38bdf8; text-decoration: none; margin-left: 18px;
+      font-size: 0.85rem; font-weight: 600;
+      padding: 6px 12px; border: 1px solid #334155; border-radius: 6px;
+    }
+    header .links a:hover { background: #1e293b; }
+    header .clock { color: #94a3b8; font-family: monospace; font-size: 0.9rem; }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 20px; padding: 20px; max-width: 1600px; margin: 0 auto;
+    }
+    @media (max-width: 1000px) { .layout { grid-template-columns: 1fr; } }
+
+    .panel {
+      background: #111827; border: 1px solid #1e293b;
+      border-radius: 14px; padding: 20px;
+    }
+    .panel h2 {
+      margin: 0 0 16px; font-size: 1rem; color: #94a3b8;
+      text-transform: uppercase; letter-spacing: 1.5px;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .panel h2 .count {
+      background: #1e293b; padding: 2px 10px; border-radius: 12px;
+      font-size: 0.75rem; color: #38bdf8;
+    }
+
+    /* ── Stats strip ── */
+    .stats {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 12px; margin-bottom: 20px;
+    }
+    .stat-card {
+      background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+      border: 1px solid #334155; border-radius: 12px;
+      padding: 14px; text-align: center;
+    }
+    .stat-card .value { font-size: 1.8rem; font-weight: 800; color: #38bdf8; }
+    .stat-card .label {
+      font-size: 0.7rem; color: #94a3b8; text-transform: uppercase;
+      letter-spacing: 1px; margin-top: 4px;
+    }
+    .stat-card.danger .value { color: #f87171; }
+    .stat-card.success .value { color: #4ade80; }
+    .stat-card.warn .value { color: #fbbf24; }
+
+    /* ── Alert cards ── */
+    .alert {
+      background: #1e1b4b; border-left: 5px solid #fbbf24;
+      border-radius: 10px; padding: 16px; margin-bottom: 12px;
+      animation: slideIn 0.3s ease-out;
+      display: grid; grid-template-columns: 120px 1fr auto; gap: 16px;
+      align-items: center;
+    }
+    .alert.critical { background: #450a0a; border-left-color: #dc2626; animation: pulseBg 2s infinite; }
+    .alert.info { background: #0c2d48; border-left-color: #38bdf8; }
+    .alert img {
+      width: 120px; height: 90px; object-fit: cover;
+      border-radius: 8px; border: 1px solid #334155;
+    }
+    .alert .body h3 { margin: 0 0 6px; font-size: 1rem; }
+    .alert .body p { margin: 0; color: #94a3b8; font-size: 0.85rem; }
+    .alert .body .meta {
+      font-family: monospace; font-size: 0.72rem; color: #64748b;
+      margin-top: 6px;
+    }
+    .alert .ack-btn {
+      background: #16a34a; color: #fff; border: none;
+      padding: 12px 20px; border-radius: 8px; font-weight: 700;
+      cursor: pointer; font-size: 0.85rem; white-space: nowrap;
+      transition: all 0.2s;
+    }
+    .alert .ack-btn:hover { background: #15803d; transform: scale(1.05); }
+
+    @keyframes slideIn {
+      from { opacity: 0; transform: translateX(-20px); }
+      to { opacity: 1; transform: translateX(0); }
+    }
+    @keyframes pulseBg {
+      0%,100% { background: #450a0a; }
+      50% { background: #5a0f0f; }
+    }
+
+    /* ── Feed ── */
+    .feed-item {
+      display: flex; gap: 10px; padding: 8px 12px;
+      border-bottom: 1px solid #1e293b; font-size: 0.82rem;
+      animation: fadeIn 0.3s;
+    }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    .feed-item .time { color: #64748b; font-family: monospace; flex-shrink: 0; }
+    .feed-item .type {
+      font-weight: 700; flex-shrink: 0; min-width: 100px;
+      font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .feed-item .msg { color: #cbd5e1; }
+    .feed-item.safe .type { color: #4ade80; }
+    .feed-item.info .type { color: #38bdf8; }
+    .feed-item.warning .type { color: #fbbf24; }
+    .feed-item.danger .type { color: #f87171; }
+    .feed-item.success .type { color: #4ade80; }
+
+    /* ── Recent images grid ── */
+    .image-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+      gap: 8px;
+    }
+    .image-grid .thumb {
+      aspect-ratio: 4/3; border-radius: 6px; overflow: hidden;
+      border: 1px solid #334155; position: relative;
+      transition: transform 0.2s; cursor: pointer;
+    }
+    .image-grid .thumb:hover { transform: scale(1.05); border-color: #38bdf8; }
+    .image-grid .thumb img { width: 100%; height: 100%; object-fit: cover; }
+    .image-grid .thumb .badge {
+      position: absolute; bottom: 2px; left: 2px; right: 2px;
+      background: rgba(0,0,0,0.7); color: #fff; font-size: 0.6rem;
+      padding: 2px 4px; border-radius: 3px; text-align: center;
+      font-family: monospace;
+    }
+    .image-grid .thumb.critical .badge { background: rgba(220,38,38,0.9); }
+
+    /* ── Empty state ── */
+    .empty {
+      text-align: center; color: #475569; padding: 40px 20px;
+      font-style: italic;
+    }
+
+    /* ── Server connection indicator ── */
+    .conn {
+      display: inline-block; width: 8px; height: 8px;
+      border-radius: 50%; background: #4ade80;
+      box-shadow: 0 0 8px #4ade80; margin-right: 6px;
+      animation: pulse 2s infinite;
+    }
+    .conn.down { background: #dc2626; box-shadow: 0 0 8px #dc2626; }
   </style>
 </head>
 <body>
-  <h1>👨‍⚕️ Care Agent Monitor</h1>
-  <a href="/" class="patient-link">← Back to Patient Terminal</a>
-  
-  <div class="container">
-    <div>
-      <div class="card">
-        <h3>🚨 Active Alerts</h3>
-        <div id="alerts">All clear.</div>
-      </div>
-      <div class="card">
-        <h3>📸 Live Visual Audit</h3>
-        <div class="gallery" id="gallery"></div>
-      </div>
+
+<header>
+  <h1><span class="angel">🛡️</span> Guardian Angel — Caregiver Dashboard</h1>
+  <div class="links">
+    <span class="clock"><span class="conn" id="connDot"></span><span id="clock">--:--:--</span></span>
+    <a href="/" target="_blank">📱 Patient View</a>
+    <a href="/api/v1/debug" target="_blank">🔧 Diagnostics</a>
+  </div>
+</header>
+
+<div class="layout">
+
+  <!-- ─── LEFT COLUMN ─── -->
+  <div>
+    <!-- Stats -->
+    <div class="stats">
+      <div class="stat-card"><div class="value" id="statFrames">0</div><div class="label">Frames</div></div>
+      <div class="stat-card warn"><div class="value" id="statAlerts">0</div><div class="label">Alerts</div></div>
+      <div class="stat-card danger"><div class="value" id="statCalls">0</div><div class="label">Voice Calls</div></div>
+      <div class="stat-card danger"><div class="value" id="statWa">0</div><div class="label">WhatsApp</div></div>
+      <div class="stat-card success"><div class="value" id="statAck">0</div><div class="label">Acknowledged</div></div>
     </div>
-    <div class="card feed">
-      <h3>📝 System Log</h3>
-      <div id="log"></div>
+
+    <!-- Active Alerts -->
+    <div class="panel">
+      <h2>Active Alerts <span class="count" id="activeCount">0</span></h2>
+      <div id="activeAlerts"><div class="empty">No active alerts. Patient is safe. ✅</div></div>
+    </div>
+
+    <!-- Recent Snapshots -->
+    <div class="panel" style="margin-top:20px;">
+      <h2>Recent Snapshots <span class="count" id="recentCount">0</span></h2>
+      <div class="image-grid" id="recentImages"><div class="empty">No snapshots yet.</div></div>
     </div>
   </div>
 
-  <script>
-    async function update() {
-      const res = await fetch('/api/v1/state');
-      const data = await res.json();
-      
-      if(data.active_alerts.length === 0) document.getElementById('alerts').innerHTML = "All clear.";
-      else {
-        document.getElementById('alerts').innerHTML = data.active_alerts.map(a => `
-          <div class="alert-box">
-            <strong>${a.gesture} Alert</strong> <br> ${a.assessment} <br>
-            <button class="btn" onclick="ack('${a.alert_id}')" style="margin-top:10px;">Acknowledge & Resolve</button>
-          </div>
-        `).join('');
+  <!-- ─── RIGHT COLUMN ─── -->
+  <div>
+    <div class="panel" style="max-height: 90vh; overflow-y: auto;">
+      <h2>Event Feed <span class="count" id="feedCount">0</span></h2>
+      <div id="feed"><div class="empty">Waiting for events...</div></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  let lastFeedLength = 0;
+  let lastActiveCount = 0;
+
+  function setConnState(up) {
+    const dot = document.getElementById('connDot');
+    dot.classList.toggle('down', !up);
+  }
+
+  async function tick() {
+    try {
+      const r = await fetch('/api/v1/state');
+      const data = await r.json();
+      setConnState(true);
+
+      // Clock
+      document.getElementById('clock').textContent = data.server_time || '--:--:--';
+
+      // Stats
+      document.getElementById('statFrames').textContent = data.stats.total_frames;
+      document.getElementById('statAlerts').textContent = data.stats.total_alerts;
+      document.getElementById('statCalls').textContent = data.stats.voice_calls;
+      document.getElementById('statWa').textContent = data.stats.whatsapp_sent;
+      document.getElementById('statAck').textContent = data.stats.acknowledged;
+
+      // Active alerts
+      renderActive(data.active_alerts);
+      document.getElementById('activeCount').textContent = data.active_alerts.length;
+      document.getElementById('recentCount').textContent = data.recent_images.length;
+      document.getElementById('feedCount').textContent = data.feed.length;
+
+      // Recent images
+      renderImages(data.recent_images);
+
+      // Feed
+      renderFeed(data.feed);
+
+      // Alarm sound on new alert
+      if (data.active_alerts.length > lastActiveCount) {
+        try { new Audio('data:audio/wav;base64,UklGRl9vT19XQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQBvT18=').play(); } catch(e) {}
       }
-
-      document.getElementById('gallery').innerHTML = data.recent_images.map(img => `<img src="${img.image}">`).join('');
-      document.getElementById('log').innerHTML = data.feed.map(f => `[${f.time}] <b>${f.type}</b>: ${f.message}<br>`).join('');
+      lastActiveCount = data.active_alerts.length;
+    } catch (e) {
+      setConnState(false);
+      console.error('State poll failed:', e);
     }
+  }
 
-    async function ack(id) {
-      await fetch('/api/v1/acknowledge', { method: 'POST', body: JSON.stringify({alert_id: id}) });
-      update();
+  function renderActive(alerts) {
+    const box = document.getElementById('activeAlerts');
+    if (!alerts.length) {
+      box.innerHTML = '<div class="empty">No active alerts. Patient is safe. ✅</div>';
+      return;
     }
-    
-    setInterval(update, 2000);
-    update();
-  </script>
+    box.innerHTML = alerts.map(a => `
+      <div class="alert ${a.severity}">
+        <img src="${a.image}" alt="snapshot" onerror="this.style.display='none'">
+        <div class="body">
+          <h3>${a.label} <span style="color:#94a3b8;font-weight:400;font-size:0.85rem;">— ${a.gesture}</span></h3>
+          <p>${a.assessment}</p>
+          <div class="meta">${a.alert_id} · ${new Date(a.created_at).toLocaleTimeString()} · status: <strong>${a.status}</strong></div>
+        </div>
+        <button class="ack-btn" onclick="acknowledge('${a.alert_id}')">✓ Acknowledge</button>
+      </div>
+    `).join('');
+  }
+
+  function renderImages(images) {
+    const box = document.getElementById('recentImages');
+    if (!images.length) {
+      box.innerHTML = '<div class="empty">No snapshots yet.</div>';
+      return;
+    }
+    box.innerHTML = images.map(i => `
+      <div class="thumb ${i.severity === 'critical' ? 'critical' : ''}">
+        <img src="${i.image}" alt="${i.gesture}" onerror="this.parentElement.style.display='none'">
+        <div class="badge">${i.gesture}</div>
+      </div>
+    `).join('');
+  }
+
+  function renderFeed(feed) {
+    const box = document.getElementById('feed');
+    if (!feed.length) {
+      box.innerHTML = '<div class="empty">Waiting for events...</div>';
+      return;
+    }
+    box.innerHTML = feed.map(f => `
+      <div class="feed-item ${f.severity || 'info'}">
+        <span class="time">${f.time}</span>
+        <span class="type">${f.type}</span>
+        <span class="msg">${f.message}</span>
+      </div>
+    `).join('');
+  }
+
+  async function acknowledge(alertId) {
+    if (!confirm(`Acknowledge alert ${alertId}?\nThis will abort the pending WhatsApp escalation.`)) return;
+    try {
+      await fetch('/api/v1/acknowledge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ alert_id: alertId })
+      });
+      tick();
+    } catch (e) {
+      alert('Failed to acknowledge: ' + e.message);
+    }
+  }
+
+  // Poll every 2 seconds
+  tick();
+  setInterval(tick, 2000);
+</script>
 </body>
 </html>
