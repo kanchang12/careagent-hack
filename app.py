@@ -52,9 +52,8 @@ feed_lock = threading.Lock()
 
 # ---------------- TIMING ----------------
 ESCALATION_WINDOW_SEC  = 120     # speaker repeats for 2 min
-ESCALATION_WHATSAPP_AT = 120     # WhatsApp at 2 min
-ESCALATION_CALL_AT     = 300     # Twilio call at 5 min
-PROCESSING_LOCK_SEC    = 300     # STOP processing for 5 min after an event
+ESCALATION_CALL_AT     = 300     # non-emergency: call at 5 min if unresolved
+PROCESSING_LOCK_SEC    = 300     # lock new frames for 5 min after an event
 
 # ---------------- BOOT DIAGNOSTICS ----------------
 app.logger.info("=" * 60)
@@ -179,12 +178,20 @@ def tool_send_to_webhook(alert_id, gesture, assessment, raw_b64):
 
 
 # ---------------- ESCALATION TIMER ----------------
-def escalation_timer(alert_id, message):
+def escalation_timer(alert_id, message, is_emergency):
+    """
+    Emergency:     call + whatsapp fired IMMEDIATELY (already done in process_frame).
+                   Timer just holds the speaker window and the processing lock.
+    Non-emergency: WhatsApp fired immediately.
+                   At 5 min, if still unresolved, place the Twilio call.
+    """
     start = time.time()
-    whatsapp_sent = False
-    call_sent = False
+    call_sent = is_emergency  # emergency already called it
 
-    app.logger.info(f"[ESCALATION {alert_id}] Timer started. Window={ESCALATION_WINDOW_SEC}s, WhatsApp@{ESCALATION_WHATSAPP_AT}s, Call@{ESCALATION_CALL_AT}s")
+    app.logger.info(
+        f"[ESCALATION {alert_id}] Timer started. emergency={is_emergency}, "
+        f"Window={ESCALATION_WINDOW_SEC}s, CallAt={ESCALATION_CALL_AT}s"
+    )
     push_feed({
         "time": datetime.utcnow().strftime("%H:%M:%S"),
         "type": "Bluetooth Speaker",
@@ -215,31 +222,31 @@ def escalation_timer(alert_id, message):
             })
             return
 
-        if not whatsapp_sent and elapsed >= ESCALATION_WHATSAPP_AT:
-            whatsapp_sent = True
-            app.logger.info(f"[ESCALATION {alert_id}] 2 min mark → sending WhatsApp ONCE")
-            ok = tool_send_whatsapp(message)
-            push_feed({
-                "time": datetime.utcnow().strftime("%H:%M:%S"),
-                "type": "Meta WhatsApp",
-                "message": f"WhatsApp {'sent' if ok else 'FAILED'} at 2 min."
-            })
-
-        if not call_sent and elapsed >= ESCALATION_CALL_AT:
+        # Non-emergency: 5-minute rule
+        if (not is_emergency) and (not call_sent) and elapsed >= ESCALATION_CALL_AT:
             call_sent = True
-            app.logger.info(f"[ESCALATION {alert_id}] 5 min mark → placing Twilio call")
-            ok = tool_send_voice_call(f"Unresolved emergency: {message}")
+            app.logger.info(f"[ESCALATION {alert_id}] 5 min unresolved → placing Twilio call")
+            ok = tool_send_voice_call(f"Unresolved request: {message}")
             push_feed({
                 "time": datetime.utcnow().strftime("%H:%M:%S"),
                 "type": "Twilio Voice",
                 "message": f"Voice call {'dispatched' if ok else 'FAILED'} at 5 min."
             })
-            # Release processing lock after 5 min
+            # release lock after escalation complete
             with alerts_lock:
                 if alert_id in alerts:
                     alerts[alert_id]["processing_locked"] = False
                     alerts[alert_id]["lock_until_ts"] = 0
             app.logger.info(f"[ESCALATION {alert_id}] 5 min elapsed. Lock released. Exiting.")
+            return
+
+        # Emergency: nothing more to escalate, exit after the 5-min lock passes
+        if is_emergency and elapsed >= ESCALATION_CALL_AT:
+            with alerts_lock:
+                if alert_id in alerts:
+                    alerts[alert_id]["processing_locked"] = False
+                    alerts[alert_id]["lock_until_ts"] = 0
+            app.logger.info(f"[ESCALATION {alert_id}] 5 min elapsed (emergency). Lock released. Exiting.")
             return
 
 
@@ -296,7 +303,7 @@ def process_frame():
             lock_until = a.get("lock_until_ts", 0)
             if lock_until > now:
                 remaining = int(lock_until - now)
-                app.logger.info(f"[FRAME] BLOCKED — alert {a['alert_id']} active. {remaining}s left on lock.")
+                app.logger.info(f"[FRAME] BLOCKED — alert {a['alert_id']} active. {remaining}s left.")
                 return jsonify({
                     "alert_id": a["alert_id"],
                     "assessment": f"Processing paused. {remaining}s left.",
@@ -397,13 +404,17 @@ def process_frame():
         plan["spoken_code"] = "EMERGENCY_DISPATCHED"
 
     tools = plan.get("tools_to_execute", {})
-    is_emergency = tools.get("voice_call", {}).get("execute", False)
-    status = "ESCALATED" if is_emergency else ("PENDING" if tools.get("whatsapp_alert", {}).get("execute", False) else "RESOLVED")
+    is_emergency = bool(tools.get("voice_call", {}).get("execute", False))
+    wants_whatsapp = bool(tools.get("whatsapp_alert", {}).get("execute", False))
 
-    any_alert = (
-        tools.get("whatsapp_alert", {}).get("execute", False)
-        or tools.get("voice_call", {}).get("execute", False)
-    )
+    if is_emergency:
+        status = "ESCALATED"
+    elif wants_whatsapp:
+        status = "PENDING"
+    else:
+        status = "RESOLVED"
+
+    any_alert = is_emergency or wants_whatsapp
 
     with alerts_lock:
         alerts[alert_id] = {
@@ -419,8 +430,39 @@ def process_frame():
             alerts[alert_id]["speak_phrase"] = "Emergency detected. Please stay calm. Help is coming."
             alerts[alert_id]["processing_locked"] = True
             alerts[alert_id]["lock_until_ts"] = time.time() + PROCESSING_LOCK_SEC
-            app.logger.info(f"[{alert_id}] EVENT RAISED — processing locked for {PROCESSING_LOCK_SEC}s.")
+            app.logger.info(f"[{alert_id}] EVENT RAISED — emergency={is_emergency} — processing locked for {PROCESSING_LOCK_SEC}s.")
 
+    # ---------- IMMEDIATE ACTIONS ----------
+    if is_emergency:
+        # EMERGENCY → call + whatsapp RIGHT NOW
+        app.logger.info(f"[{alert_id}] EMERGENCY — dispatching call + WhatsApp immediately.")
+        reason = tools.get("voice_call", {}).get("reason", "Critical alert.")
+        ok_call = tool_send_voice_call(reason)
+        push_feed({
+            "time": datetime.utcnow().strftime("%H:%M:%S"),
+            "type": "Twilio Voice",
+            "message": f"Emergency call {'dispatched' if ok_call else 'FAILED'} immediately."
+        })
+        msg = tools.get("whatsapp_alert", {}).get("message", "Critical alert.")
+        ok_wa = tool_send_whatsapp(msg)
+        push_feed({
+            "time": datetime.utcnow().strftime("%H:%M:%S"),
+            "type": "Meta WhatsApp",
+            "message": f"Emergency WhatsApp {'sent' if ok_wa else 'FAILED'} immediately."
+        })
+
+    elif wants_whatsapp:
+        # NON-EMERGENCY → WhatsApp right now, call at 5 min if unresolved
+        app.logger.info(f"[{alert_id}] NON-EMERGENCY — sending WhatsApp now; call scheduled at 5 min.")
+        msg = tools.get("whatsapp_alert", {}).get("message", "Patient needs attention.")
+        ok_wa = tool_send_whatsapp(msg)
+        push_feed({
+            "time": datetime.utcnow().strftime("%H:%M:%S"),
+            "type": "Meta WhatsApp",
+            "message": f"WhatsApp {'sent' if ok_wa else 'FAILED'} immediately."
+        })
+
+    # ---------- START ESCALATION TIMER (holds lock + speaker window) ----------
     if any_alert:
         push_feed({
             "time": datetime.utcnow().strftime("%H:%M:%S"),
@@ -429,7 +471,7 @@ def process_frame():
         })
         threading.Thread(
             target=escalation_timer,
-            args=(alert_id, tools.get("whatsapp_alert", {}).get("message", "Patient needs attention.")),
+            args=(alert_id, tools.get("whatsapp_alert", {}).get("message", "Patient needs attention."), is_emergency),
             daemon=True
         ).start()
 
