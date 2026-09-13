@@ -64,19 +64,40 @@
       window.speechSynthesis.speak(new SpeechSynthesisUtterance(phrase));
     }
 
-    function initSystem() {
-      speak("");
+    async function initSystem() {
+      // Unlock speech synthesis inside the user gesture
+      try {
+        const u = new SpeechSynthesisUtterance(" ");
+        u.volume = 0;
+        window.speechSynthesis.speak(u);
+      } catch (e) { /* ignore */ }
+
       document.getElementById('startBtn').style.display = "none";
       document.getElementById('stopBtn').style.display = "inline-block";
       log("Starting camera...");
 
-      navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: "user" } })
-        .then(stream => {
-          activeStream = stream;
-          video.srcObject = stream;
-          initMediaPipe();
-          watchdogInterval = setInterval(() => { if (!isLocked) dispatchEvent("NONE"); }, 8000);
-        }).catch(e => log("Camera Error: " + e.message));
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 640, height: 480, facingMode: "user" }
+        });
+        activeStream = stream;
+        video.srcObject = stream;
+
+        // Wait until the video actually has dimensions
+        await new Promise(resolve => {
+          if (video.videoWidth > 0) return resolve();
+          video.onloadedmetadata = () => resolve();
+        });
+
+        log("Camera ready. Initialising MediaPipe...");
+        await initMediaPipe();
+
+        watchdogInterval = setInterval(() => {
+          if (!isLocked) dispatchEvent("NONE");
+        }, 8000);
+      } catch (e) {
+        log("Camera Error: " + e.message);
+      }
     }
 
     function stopSystem() {
@@ -164,15 +185,20 @@
       } catch (err) { log("API Error"); }
     }
 
-    // ===================== ORIGINAL WORKING MEDIAPIPE =====================
-    function initMediaPipe() {
+    // ===================== MEDIAPIPE =====================
+    async function initMediaPipe() {
       const hands = new Hands({
         locateFile: (file) => {
           return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`;
         }
       });
 
-      hands.setOptions({ maxNumHands: 1, minDetectionConfidence: 0.5 });
+      hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5,
+      });
 
       let stable = null;
       let count = 0;
@@ -186,12 +212,16 @@
         const lm = results.multiHandLandmarks[0];
         let fingers = 0;
 
-        if (lm[8].y < lm[6].y) fingers++;
+        if (lm[8].y  < lm[6].y)  fingers++;
         if (lm[12].y < lm[10].y) fingers++;
         if (lm[16].y < lm[14].y) fingers++;
         if (lm[20].y < lm[18].y) fingers++;
 
-        let gesture = (fingers === 0) ? "FIST" : (fingers <= 3 ? (fingers === 1 ? "WATER" : (fingers === 2 ? "FOOD" : "TOILET")) : "NONE");
+        let gesture = (fingers === 0) ? "FIST"
+                    : (fingers === 1) ? "WATER"
+                    : (fingers === 2) ? "FOOD"
+                    : (fingers === 3) ? "TOILET"
+                    : "NONE";
 
         if (gesture !== "NONE") {
           if (stable === gesture) {
@@ -211,8 +241,29 @@
         }
       });
 
-      activeCamera = new Camera(video, { onFrame: async () => { await hands.send({ image: video }); }, width: 640, height: 480 });
+      // CRITICAL: wait for model to fully load before sending any frames
+      try {
+        await hands.initialize();
+        log("✅ MediaPipe Hands ready.");
+      } catch (e) {
+        log("❌ MediaPipe init failed: " + e);
+        return;
+      }
+
+      activeCamera = new Camera(video, {
+        onFrame: async () => {
+          if (video.videoWidth === 0 || video.videoHeight === 0) return;
+          try {
+            await hands.send({ image: video });
+          } catch (e) {
+            // swallow WASM abort spam
+          }
+        },
+        width: 640,
+        height: 480
+      });
       activeCamera.start();
+      log("📷 Camera loop started.");
     }
   </script>
 </body>
