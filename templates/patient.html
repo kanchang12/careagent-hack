@@ -10,11 +10,15 @@
     video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
     .btn { padding: 16px 24px; font-size: 1.2rem; font-weight: bold; background: #2563eb; color: #fff; border: none; border-radius: 8px; cursor: pointer; }
     #log { font-family: monospace; color: #38bdf8; margin-top: 20px; font-size: 0.9rem; }
+    .dash-link { display: inline-block; margin-bottom: 15px; color: #38bdf8; text-decoration: none; font-weight: bold; }
+    .dash-link:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
 
   <h2>🛡️ Care Guardian Edge</h2>
+  <a href="/dashboard" class="dash-link" target="_blank">↗ Open Caregiver Dashboard</a>
+  
   <div class="camera-box"><video id="videoFeed" autoplay playsinline muted></video></div>
   <p>Gestures: 1=Water | 2=Food | 3=Toilet | Fist=EMERGENCY</p>
   
@@ -22,8 +26,9 @@
   <div id="log">Waiting to start...</div>
   <audio id="comfortAudio" loop></audio>
 
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+  <!-- FIXED: Version-pinned CDN links to prevent the 404 WASM crash -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js" crossorigin="anonymous"></script>
 
   <script>
     const video = document.getElementById('videoFeed');
@@ -89,7 +94,12 @@
     }
 
     function initMediaPipe() {
-      const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+      // FIXED: Forces MediaPipe to load the exact same version's WASM and TFLite files
+      const hands = new Hands({ 
+        locateFile: (file) => {
+          return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`;
+        }
+      });
       hands.setOptions({ maxNumHands: 1, minDetectionConfidence: 0.7 });
       
       let stable = null; let count = 0;
