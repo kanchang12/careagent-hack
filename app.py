@@ -125,6 +125,32 @@ def tool_get_jamendo_music():
         app.logger.error(f"[Jamendo Error] {e}")
         return "https://prod-1.storage.jamendo.com/?trackid=1890757&format=mp31"
 
+# --- TOOL 4: MAKE.COM WEBHOOK (GOOGLE DRIVE) ---
+def tool_send_to_webhook(alert_id, gesture, assessment, raw_b64):
+    webhook_url = os.getenv("MAKE_WEBHOOK_URL")
+    if not webhook_url:
+        return False
+        
+    payload = {
+        "alert_id": alert_id,
+        "timestamp": datetime.utcnow().isoformat(),
+        "gesture": gesture,
+        "assessment": assessment,
+        "filename": f"{alert_id}.jpg",
+        "image_base64": raw_b64 
+    }
+    
+    try:
+        response = requests.post(webhook_url, json=payload, timeout=5)
+        if response.status_code in [200, 201]:
+            app.logger.info("[Webhook] Data sent to Make.com successfully.")
+            return True
+        app.logger.error(f"[Webhook Error] Make.com rejected payload: {response.text}")
+        return False
+    except Exception as e:
+        app.logger.error(f"[Webhook Exception] {e}")
+        return False
+
 # --- VIEWS & ROUTES ---
 @app.route("/", methods=["GET", "POST"])
 def patient_view():
@@ -216,7 +242,7 @@ def process_frame():
             "image": f"/uploads/{fname}"
         }
     
-    # Tool Executions
+    # --- Execute Tools ---
     if tools.get("whatsapp_alert", {}).get("execute", False):
         tool_send_whatsapp(tools["whatsapp_alert"].get("message", "Patient needs attention."))
         push_feed({"time": datetime.utcnow().strftime("%H:%M:%S"), "type": "Meta WhatsApp", "message": "Alert Dispatched."})
@@ -228,6 +254,11 @@ def process_frame():
     music_url = tool_get_jamendo_music() if tools.get("comfort_music", {}).get("execute", False) else None
     if music_url:
         push_feed({"time": datetime.utcnow().strftime("%H:%M:%S"), "type": "Jamendo API", "message": "Comfort Music Deployed."})
+
+    # Webhook triggers on ANY explicit hand gesture for permanent G-Drive backup
+    if gesture_input != "NONE":
+        tool_send_to_webhook(alert_id, gesture_input, plan.get("assessment", ""), raw_b64)
+        push_feed({"time": datetime.utcnow().strftime("%H:%M:%S"), "type": "Make.com", "message": "Backed up to G-Drive."})
 
     if status == "RESOLVED":
         push_feed({"time": datetime.utcnow().strftime("%H:%M:%S"), "type": "WATCHDOG", "message": "Routine check safe."})
