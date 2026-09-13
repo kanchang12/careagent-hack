@@ -150,7 +150,9 @@ def tool_send_to_webhook(alert_id, gesture, assessment, raw_b64):
 
 
 def escalation_ladder(alert_id, message, gesture):
-    app.logger.info(f"[{alert_id}] Ladder started")
+    app.logger.info(f"[{alert_id}] Ladder started (repeat every 20s for 2 min)")
+
+    # Immediate local speaker alert
     push_speaker_command({
         "action": "play_alert",
         "alert_id": alert_id,
@@ -164,55 +166,52 @@ def escalation_ladder(alert_id, message, gesture):
     })
 
     start = time.time()
+    interval = 20  # seconds
+    max_duration = 120  # 2 minutes
 
-    while time.time() - start < WHATSAPP_AFTER_SEC:
-        time.sleep(2)
-        with alerts_lock:
-            alert = alerts.get(alert_id)
-            if not alert or alert["status"] == "RESOLVED":
-                push_feed({
-                    "time": datetime.utcnow().strftime("%H:%M:%S"),
-                    "type": "Dashboard",
-                    "message": f"Caregiver came. Ladder stopped for {alert_id}."
-                })
-                return
-
-    with alerts_lock:
-        alert = alerts.get(alert_id)
-        if alert:
-            alert["status"] = "WHATSAPP_SENT"
-
+    # Send first remote notification immediately (optional; you can move this inside the loop if you prefer)
     tool_send_whatsapp(message)
     push_feed({
         "time": datetime.utcnow().strftime("%H:%M:%S"),
         "type": "Meta WhatsApp",
-        "message": "2 min passed. WhatsApp sent."
+        "message": "Initial WhatsApp alert sent."
     })
 
-    while time.time() - start < VOICE_AFTER_SEC:
-        time.sleep(2)
+    while True:
+        elapsed = time.time() - start
+        if elapsed >= max_duration:
+            push_feed({
+                "time": datetime.utcnow().strftime("%H:%M:%S"),
+                "type": "Dashboard",
+                "message": f"2 min passed. Stopping repeats for {alert_id}."
+            })
+            # Optional: escalate to voice call here if you want
+            # tool_send_voice_call(f"Unacknowledged alert: {gesture}. {message}")
+            return
+
+        # Sleep until next 20s interval
+        next_tick = start + ((int(elapsed) // interval) + 1) * interval
+        sleep_time = max(0, next_tick - time.time())
+        time.sleep(sleep_time)
+
+        # Check if resolved while sleeping
         with alerts_lock:
             alert = alerts.get(alert_id)
             if not alert or alert["status"] == "RESOLVED":
                 push_feed({
                     "time": datetime.utcnow().strftime("%H:%M:%S"),
                     "type": "Dashboard",
-                    "message": f"Caregiver came. Voice call cancelled for {alert_id}."
+                    "message": f"Caregiver acknowledged. Stopping repeats for {alert_id}."
                 })
                 return
 
-    with alerts_lock:
-        alert = alerts.get(alert_id)
-        if alert:
-            alert["status"] = "VOICE_CALLED"
-
-    tool_send_voice_call(f"Emergency gesture: {gesture}. {message}")
-    push_feed({
-        "time": datetime.utcnow().strftime("%H:%M:%S"),
-        "type": "Twilio Voice",
-        "message": "5 min passed. Voice call dispatched."
-    })
-
+        # Send reminder
+        tool_send_whatsapp(f"REMINDER ({gesture}): {message}")
+        push_feed({
+            "time": datetime.utcnow().strftime("%H:%M:%S"),
+            "type": "Meta WhatsApp",
+            "message": f"Reminder sent for {alert_id}."
+        })
 
 @app.route("/", methods=["GET", "POST"])
 def patient_view():
