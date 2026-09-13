@@ -3,151 +3,41 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Guardian Angel — Patient Terminal</title>
+  <title>Care Agent — Patient Terminal</title>
   <style>
-    * { box-sizing: border-box; }
-    body {
-      background: radial-gradient(ellipse at top, #1e293b 0%, #0f172a 60%);
-      color: #fff; font-family: system-ui, -apple-system, sans-serif;
-      text-align: center; margin: 0; padding: 20px; min-height: 100vh;
-    }
-    h1 { margin: 0 0 10px; font-size: 1.8rem; }
-    h1 .angel { filter: drop-shadow(0 0 12px #38bdf8); }
-    .subtitle { color: #94a3b8; margin-bottom: 25px; font-size: 0.9rem; }
-    .top-links a {
-      display: inline-block; margin: 0 8px 15px; color: #38bdf8;
-      text-decoration: none; font-weight: 600; font-size: 0.9rem;
-      padding: 6px 14px; border: 1px solid #334155; border-radius: 6px;
-      transition: all 0.2s;
-    }
-    .top-links a:hover { background: #1e293b; border-color: #38bdf8; }
-
-    .camera-box {
-      width: 100%; max-width: 560px; height: 420px; background: #000;
-      border: 3px solid #334155; border-radius: 16px; margin: 0 auto 20px;
-      position: relative; overflow: hidden;
-      box-shadow: 0 20px 60px rgba(0,0,0,0.5);
-      transition: border-color 0.3s, box-shadow 0.3s;
-    }
-    .camera-box.live { border-color: #16a34a; box-shadow: 0 0 30px rgba(22,163,74,0.4); }
-    .camera-box.emergency { border-color: #dc2626; box-shadow: 0 0 40px rgba(220,38,38,0.7); }
+    body { background: #0f172a; color: #fff; font-family: sans-serif; text-align: center; margin: 0; padding: 20px; }
+    .camera-box { width: 100%; max-width: 480px; height: 360px; background: #000; border: 3px solid #334155; border-radius: 12px; margin: 0 auto 20px; position: relative; overflow: hidden; }
     video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
-
-    .gesture-hint { display: flex; justify-content: center; gap: 12px; flex-wrap: wrap; margin: 20px 0; }
-    .gesture-hint div {
-      background: #1e293b; padding: 8px 14px; border-radius: 8px;
-      font-size: 0.85rem; border: 1px solid #334155;
-    }
-    .gesture-hint div.emergency { border-color: #dc2626; background: #450a0a; }
-    kbd {
-      background: #0f172a; border: 1px solid #475569; border-bottom-width: 2px;
-      border-radius: 4px; padding: 1px 6px; font-family: monospace;
-      font-size: 0.8em; color: #fbbf24;
-    }
-
-    .btn {
-      padding: 14px 28px; font-size: 1.05rem; font-weight: 700;
-      background: #2563eb; color: #fff; border: none; border-radius: 10px;
-      cursor: pointer; margin: 4px; transition: all 0.2s;
-      box-shadow: 0 4px 12px rgba(37,99,235,0.3);
-    }
-    .btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(37,99,235,0.5); }
-    .btn:active { transform: translateY(0); }
-    .btn.green { background: #16a34a; box-shadow: 0 4px 12px rgba(22,163,74,0.3); }
-    .btn.red { background: #dc2626; box-shadow: 0 4px 12px rgba(220,38,38,0.3); }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
-
-    .test-label {
-      color: #94a3b8; font-size: 0.75rem; text-transform: uppercase;
-      letter-spacing: 1px; margin: 20px 0 8px;
-    }
-
-    #log {
-      font-family: 'SF Mono', Consolas, monospace; color: #38bdf8;
-      margin-top: 20px; font-size: 0.82rem; text-align: left;
-      max-width: 640px; margin: 20px auto 0; background: #0a0f1a;
-      padding: 16px; border-radius: 12px; border: 1px solid #1e293b;
-      max-height: 240px; overflow-y: auto; line-height: 1.6;
-    }
-    #log .ts { color: #64748b; }
-    #log .highlight { color: #fbbf24; font-weight: 600; }
-    #log .success { color: #4ade80; }
-    #log .danger { color: #f87171; font-weight: 600; }
-
-    #debugState {
-      font-family: monospace; color: #fbbf24; font-size: 0.78rem;
-      margin-top: 12px; background: #1e293b; padding: 10px;
-      border-radius: 8px; max-width: 640px; margin: 12px auto;
-      word-break: break-all;
-    }
-
-    .pulse { animation: pulse 1.5s ease-in-out infinite; }
-    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
-
-    .status-badge {
-      display: inline-block; padding: 4px 12px; border-radius: 20px;
-      font-size: 0.75rem; font-weight: 700; text-transform: uppercase;
-      letter-spacing: 1px;
-    }
-    .status-badge.idle { background: #475569; }
-    .status-badge.live { background: #16a34a; box-shadow: 0 0 20px rgba(22,163,74,0.6); }
-    .status-badge.emergency { background: #dc2626; box-shadow: 0 0 20px rgba(220,38,38,0.6); animation: pulse 1s infinite; }
+    .btn { padding: 16px 24px; font-size: 1.2rem; font-weight: bold; background: #2563eb; color: #fff; border: none; border-radius: 8px; cursor: pointer; }
+    #log { font-family: monospace; color: #38bdf8; margin-top: 20px; font-size: 0.9rem; }
+    .dash-link { display: inline-block; margin-bottom: 15px; color: #38bdf8; text-decoration: none; font-weight: bold; }
+    .dash-link:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
 
-  <h1><span class="angel">🛡️</span> Guardian Angel</h1>
-  <p class="subtitle">Autonomous Elderly Care Companion — Patient Terminal</p>
+  <h2>🛡️ Care Guardian Edge</h2>
+  <a href="/dashboard" class="dash-link" target="_blank">↗ Open Caregiver Dashboard</a>
+  
+  <div class="camera-box"><video id="videoFeed" autoplay playsinline muted></video></div>
+  <p>Gestures: 1=Water | 2=Food | 3=Toilet | Fist=EMERGENCY</p>
+  
+  <button class="btn" id="startBtn" onclick="initSystem()">Initialize Agent</button>
+  <div id="log">Waiting to start...</div>
+  <audio id="comfortAudio" loop></audio>
 
-  <div class="top-links">
-    <a href="/dashboard" target="_blank">📊 Caregiver Dashboard</a>
-    <a href="/api/v1/debug" target="_blank">🔧 Diagnostics</a>
-  </div>
-
-  <div class="camera-box" id="cameraBox">
-    <video id="videoFeed" autoplay playsinline muted></video>
-  </div>
-
-  <div><span class="status-badge idle" id="statusBadge">IDLE</span></div>
-
-  <div class="gesture-hint">
-    <div>☝️ 1 finger <span style="color:#64748b">(or <kbd>1</kbd>)</span> → Water</div>
-    <div>✌️ 2 fingers <span style="color:#64748b">(or <kbd>2</kbd>)</span> → Food</div>
-    <div>🤟 3 fingers <span style="color:#64748b">(or <kbd>3</kbd>)</span> → Toilet</div>
-    <div class="emergency">✊ Fist <span style="color:#fca5a5">(or <kbd>F</kbd>)</span> → EMERGENCY</div>
-  </div>
-
-  <button class="btn" id="startBtn" onclick="initSystem()">▶ Initialize Guardian</button>
-
-  <div class="test-label">— Manual Demo Triggers (work instantly, no camera needed) —</div>
-  <div>
-    <button class="btn green" onclick="manualTrigger('WATER')">💧 Water</button>
-    <button class="btn green" onclick="manualTrigger('FOOD')">🍽 Food</button>
-    <button class="btn green" onclick="manualTrigger('TOILET')">🚻 Toilet</button>
-    <button class="btn red" onclick="manualTrigger('FIST')">🚨 Emergency</button>
-  </div>
-
-  <div id="log">[system] Ready. Click a button above or press 1 / 2 / 3 / F on your keyboard.</div>
-  <div id="debugState"></div>
-
-  <audio id="comfortAudio" loop playsinline></audio>
-
+  <!-- FIXED: Version-pinned CDN links to prevent the 404 WASM crash -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js" crossorigin="anonymous"></script>
 
   <script>
     const video = document.getElementById('videoFeed');
     const logBox = document.getElementById('log');
-    const debugBox = document.getElementById('debugState');
     const comfortAudio = document.getElementById('comfortAudio');
-    const statusBadge = document.getElementById('statusBadge');
-    const cameraBox = document.getElementById('cameraBox');
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
     let isLocked = false;
-    let mediaPipeReady = false;
-    let audioUnlocked = false;
-
+    
     const VOCAB = {
       "CONFIRM_WATER": "Noted. Your family has been alerted for water.",
       "CONFIRM_FOOD": "Noted. Your family has been alerted for food.",
@@ -156,65 +46,107 @@
       "COMFORT_WAITING": "Help is on the way. Just breathe."
     };
 
-    function log(msg, cls = '') {
-      const ts = new Date().toLocaleTimeString();
-      logBox.innerHTML = `<div><span class="ts">[${ts}]</span> <span class="${cls}">${msg}</span></div>` + logBox.innerHTML;
-    }
-
-    function setStatus(state) {
-      statusBadge.className = 'status-badge ' + state;
-      statusBadge.textContent = state.toUpperCase();
-      cameraBox.classList.toggle('live', state === 'live' || state === 'emergency');
-      cameraBox.classList.toggle('emergency', state === 'emergency');
-    }
-
+    function log(msg) { logBox.innerHTML = `[${new Date().toLocaleTimeString()}] ${msg}<br>` + logBox.innerHTML; }
+    
     function speak(phrase) {
       if (!window.speechSynthesis) return;
-      try {
-        window.speechSynthesis.cancel();
-        const u = new SpeechSynthesisUtterance(phrase);
-        u.rate = 1.0; u.pitch = 1.0;
-        window.speechSynthesis.speak(u);
-      } catch (e) { console.warn('speech failed', e); }
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(new SpeechSynthesisUtterance(phrase));
     }
 
-    // ── Unlock audio on first user gesture (needed for autoplay policies) ──
-    function unlockAudio() {
-      if (audioUnlocked) return;
-      audioUnlocked = true;
-      comfortAudio.src = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
-      comfortAudio.play().then(() => {
-        comfortAudio.pause();
-        comfortAudio.currentTime = 0;
-      }).catch(() => {});
-      try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {}
-    }
-    document.addEventListener('click', unlockAudio, { once: true });
-    document.addEventListener('keydown', unlockAudio, { once: true });
-
-    // ── Initialize camera + MediaPipe ──
     function initSystem() {
-      unlockAudio();
-      document.getElementById('startBtn').disabled = true;
+      speak(""); 
+      document.getElementById('startBtn').style.display = "none";
       log("Starting camera...");
-      setStatus('idle');
-
       navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: "user" } })
         .then(stream => {
           video.srcObject = stream;
-          setStatus('live');
-          log("Camera live ✅", 'success');
           initMediaPipe();
-          // Watchdog — every 15s, only if camera is live
-          setInterval(() => {
-            if (!isLocked && video.videoWidth) dispatchEvent("NONE", true);
-          }, 15000);
-        })
-        .catch(e => {
-          log("Camera Error: " + e.message + " — you can still use the manual buttons.", 'danger');
-          setStatus('idle');
-          document.getElementById('startBtn').disabled = false;
-        });
+          // FAST WATCHDOG: Checks every 8 seconds instead of 40 for a snappy dashboard
+          setInterval(() => { if(!isLocked) dispatchEvent("NONE"); }, 8000);
+        }).catch(e => log("Camera Error: " + e.message));
     }
 
-    // ── Dispatch an event to
+    async function dispatchEvent(gestureName) {
+      if (!video.videoWidth) return;
+      canvas.width = 480; canvas.height = 360;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const b64 = canvas.toDataURL("image/jpeg", 0.7);
+
+      try {
+        const res = await fetch("/api/v1/process-frame", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ gesture: gestureName, snapshot: b64 })
+        });
+        const data = await res.json();
+        
+        log(`Agent Assessed: ${data.assessment}`);
+        
+        if (data.play_music_url) {
+            comfortAudio.src = data.play_music_url;
+            comfortAudio.play().catch(e => console.log("Audio block", e));
+            log("🎵 Comfort Music Deployed.");
+        } else {
+            comfortAudio.pause();
+        }
+
+        if (VOCAB[data.spoken_code]) speak(VOCAB[data.spoken_code]);
+      } catch (err) { log("API Error"); }
+    }
+
+    function initMediaPipe() {
+      // FORCED ASSETS: Maps directly to the pinned CDN version
+      const hands = new Hands({ 
+        locateFile: (file) => {
+          return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`;
+        }
+      });
+      
+      // SENSITIVITY FIX: Dropped to 0.5 so it catches hands further away
+      hands.setOptions({ maxNumHands: 1, minDetectionConfidence: 0.5 });
+      
+      let stable = null; 
+      let count = 0;
+      
+      hands.onResults((results) => {
+        if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) { 
+            count = 0; 
+            return; 
+        }
+        
+        const lm = results.multiHandLandmarks[0];
+        let fingers = 0;
+        
+        // MARGIN FIX: Removed the rigid pixel margin. If tip is above knuckle, it counts.
+        if (lm[8].y < lm[6].y) fingers++;
+        if (lm[12].y < lm[10].y) fingers++;
+        if (lm[16].y < lm[14].y) fingers++;
+        if (lm[20].y < lm[18].y) fingers++;
+        
+        let gesture = (fingers === 0) ? "FIST" : (fingers <= 3 ? (fingers === 1 ? "WATER" : (fingers === 2 ? "FOOD" : "TOILET")) : "NONE");
+        
+        if (gesture !== "NONE") {
+          if (stable === gesture) {
+              count++; 
+          } else { 
+              stable = gesture; 
+              count = 1; 
+          }
+          // INSTANT TRIGGER: Reduced from 25 frames to 5 frames
+          if (count === 5 && !isLocked) {
+            isLocked = true;
+            log(`🎯 Trigger: ${gesture}`);
+            dispatchEvent(gesture);
+            setTimeout(() => { isLocked = false; count=0; }, 5000);
+          }
+        } else {
+            count = 0;
+        }
+      });
+      
+      const camera = new Camera(video, { onFrame: async () => { await hands.send({ image: video }); }, width: 640, height: 480 });
+      camera.start();
+    }
+  </script>
+</body>
+</html>
