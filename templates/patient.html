@@ -19,17 +19,17 @@
 
   <h2>🛡️ Care Guardian Edge</h2>
   <a href="/dashboard" class="dash-link" target="_blank">↗ Open Caregiver Dashboard</a>
-  
+
   <div class="camera-box"><video id="videoFeed" autoplay playsinline muted></video></div>
   <p>Gestures: 1=Water | 2=Food | 3=Toilet | Fist=EMERGENCY</p>
-  
+
   <button class="btn" id="startBtn" onclick="initSystem()">Initialize Agent</button>
   <button class="btn btn-danger" id="stopBtn" onclick="stopSystem()" style="display: none;">Stop Agent</button>
-  
+
   <div id="log">Waiting to start...</div>
   <audio id="comfortAudio" loop></audio>
 
-  <!-- FIXED: Version-pinned CDN links to prevent the 404 WASM crash -->
+  <!-- Version-pinned CDN links -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js" crossorigin="anonymous"></script>
 
@@ -39,12 +39,13 @@
     const comfortAudio = document.getElementById('comfortAudio');
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
-    
+
     let isLocked = false;
     let watchdogInterval = null;
     let activeStream = null;
     let activeCamera = null;
-    
+    let speakerLoop = null;   // <-- 20s repeating speaker interval
+
     const VOCAB = {
       "CONFIRM_WATER": "Noted. Your family has been alerted for water.",
       "CONFIRM_FOOD": "Noted. Your family has been alerted for food.",
@@ -54,7 +55,7 @@
     };
 
     function log(msg) { logBox.innerHTML = `[${new Date().toLocaleTimeString()}] ${msg}<br>` + logBox.innerHTML; }
-    
+
     function speak(phrase) {
       if (!window.speechSynthesis) return;
       window.speechSynthesis.cancel();
@@ -62,43 +63,68 @@
     }
 
     function initSystem() {
-      speak(""); 
+      speak("");
       document.getElementById('startBtn').style.display = "none";
       document.getElementById('stopBtn').style.display = "inline-block";
       log("Starting camera...");
-      
+
       navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: "user" } })
         .then(stream => {
           activeStream = stream;
           video.srcObject = stream;
           initMediaPipe();
-          // FAST WATCHDOG: Checks every 8 seconds instead of 40 for a snappy dashboard
           watchdogInterval = setInterval(() => { if(!isLocked) dispatchEvent("NONE"); }, 8000);
         }).catch(e => log("Camera Error: " + e.message));
     }
 
     function stopSystem() {
-      // 1. Stop the background ping
+      // 1. Stop background ping
       if (watchdogInterval) clearInterval(watchdogInterval);
-      
-      // 2. Stop MediaPipe Camera loop
+
+      // 2. Stop the emergency speaker loop
+      if (speakerLoop) { clearInterval(speakerLoop); speakerLoop = null; }
+
+      // 3. Stop MediaPipe camera loop
       if (activeCamera) activeCamera.stop();
-      
-      // 3. Kill the physical webcam feed
+
+      // 4. Kill the physical webcam feed
       if (activeStream) {
         activeStream.getTracks().forEach(track => track.stop());
       }
       video.srcObject = null;
-      
-      // 4. Halt media and UI
+
+      // 5. Halt media and UI
       comfortAudio.pause();
       comfortAudio.currentTime = 0;
       window.speechSynthesis.cancel();
       isLocked = false;
-      
+
       document.getElementById('startBtn').style.display = "inline-block";
       document.getElementById('stopBtn').style.display = "none";
       log("🛑 Agent sequence stopped. Camera and watchdog offline.");
+    }
+
+    // --- SPEAKER LOOP: repeats every 20s until caregiver ACKs or 2-min window ends ---
+    function startSpeakerLoop() {
+      if (speakerLoop) return;
+      log("🔊 Emergency speaker loop active (every 20s).");
+
+      const tick = async () => {
+        try {
+          const r = await fetch("/api/v1/patient-loop");
+          const d = await r.json();
+          if (!d.speak) {
+            log("✅ Caregiver acknowledged. Speaker loop stopped.");
+            if (speakerLoop) { clearInterval(speakerLoop); speakerLoop = null; }
+            return;
+          }
+          speak(d.phrase);
+          log(`🔊 Speaker: "${d.phrase}" (${d.remaining}s left in loop)`);
+        } catch (e) { /* ignore transient errors */ }
+      };
+
+      tick();                                   // speak immediately
+      speakerLoop = setInterval(tick, 20000);   // then every 20 seconds
     }
 
     async function dispatchEvent(gestureName) {
@@ -113,9 +139,9 @@
           body: JSON.stringify({ gesture: gestureName, snapshot: b64 })
         });
         const data = await res.json();
-        
+
         log(`Agent Assessed: ${data.assessment}`);
-        
+
         if (data.play_music_url) {
             comfortAudio.src = data.play_music_url;
             comfortAudio.play().catch(e => console.log("Audio block", e));
@@ -125,48 +151,49 @@
         }
 
         if (VOCAB[data.spoken_code]) speak(VOCAB[data.spoken_code]);
+
+        // Kick off the 20s repeating loop whenever an alert was actually raised
+        if (data.alert_id && data.spoken_code && data.spoken_code !== "NONE") {
+          startSpeakerLoop();
+        }
       } catch (err) { log("API Error"); }
     }
 
     function initMediaPipe() {
-      // FORCED ASSETS: Maps directly to the pinned CDN version
-      const hands = new Hands({ 
+      const hands = new Hands({
         locateFile: (file) => {
           return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`;
         }
       });
-      
-      // SENSITIVITY FIX: Dropped to 0.5 so it catches hands further away
+
       hands.setOptions({ maxNumHands: 1, minDetectionConfidence: 0.5 });
-      
-      let stable = null; 
+
+      let stable = null;
       let count = 0;
-      
+
       hands.onResults((results) => {
-        if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) { 
-            count = 0; 
-            return; 
+        if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+            count = 0;
+            return;
         }
-        
+
         const lm = results.multiHandLandmarks[0];
         let fingers = 0;
-        
-        // MARGIN FIX: Removed the rigid pixel margin. If tip is above knuckle, it counts.
+
         if (lm[8].y < lm[6].y) fingers++;
         if (lm[12].y < lm[10].y) fingers++;
         if (lm[16].y < lm[14].y) fingers++;
         if (lm[20].y < lm[18].y) fingers++;
-        
+
         let gesture = (fingers === 0) ? "FIST" : (fingers <= 3 ? (fingers === 1 ? "WATER" : (fingers === 2 ? "FOOD" : "TOILET")) : "NONE");
-        
+
         if (gesture !== "NONE") {
           if (stable === gesture) {
-              count++; 
-          } else { 
-              stable = gesture; 
-              count = 1; 
+              count++;
+          } else {
+              stable = gesture;
+              count = 1;
           }
-          // INSTANT TRIGGER: Reduced from 25 frames to 5 frames
           if (count === 5 && !isLocked) {
             isLocked = true;
             log(`🎯 Trigger: ${gesture}`);
@@ -177,7 +204,7 @@
             count = 0;
         }
       });
-      
+
       activeCamera = new Camera(video, { onFrame: async () => { await hands.send({ image: video }); }, width: 640, height: 480 });
       activeCamera.start();
     }
