@@ -72,11 +72,7 @@ Non-verbal patients, stroke survivors, dementia patients in early stages, and po
 
 ---
 
-## 4. YouTube Link
-
-*(Insert demo video URL here before submission)*
-
-`https://youtu.be/________________`
+## 4. (https://www.loom.com/share/a2c70ec370404b8c8be6f46dd0c83675)
 
 ---
 
