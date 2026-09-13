@@ -15,18 +15,13 @@
 <body>
 
   <h2>🛡️ Care Guardian Edge</h2>
-  
-  <div class="camera-box">
-    <video id="videoFeed" autoplay playsinline muted></video>
-  </div>
-  
+  <div class="camera-box"><video id="videoFeed" autoplay playsinline muted></video></div>
   <p>Gestures: 1=Water | 2=Food | 3=Toilet | Fist=EMERGENCY</p>
+  
   <button class="btn" id="startBtn" onclick="initSystem()">Initialize Agent</button>
   <div id="log">Waiting to start...</div>
-
   <audio id="comfortAudio" loop></audio>
 
-  <!-- MediaPipe -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
 
@@ -36,7 +31,6 @@
     const comfortAudio = document.getElementById('comfortAudio');
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
-    
     let isLocked = false;
     
     const VOCAB = {
@@ -48,7 +42,6 @@
     };
 
     function log(msg) { logBox.innerHTML = `[${new Date().toLocaleTimeString()}] ${msg}<br>` + logBox.innerHTML; }
-
     function speak(phrase) {
       if (!window.speechSynthesis) return;
       window.speechSynthesis.cancel();
@@ -56,15 +49,14 @@
     }
 
     function initSystem() {
-      speak(""); // Unlock audio
+      speak(""); 
       document.getElementById('startBtn').style.display = "none";
       log("Starting camera...");
-
       navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: "user" } })
         .then(stream => {
           video.srcObject = stream;
           initMediaPipe();
-          setInterval(() => { if(!isLocked) dispatchEvent("NONE"); }, 40000); // 40s Watchdog
+          setInterval(() => { if(!isLocked) dispatchEvent("NONE"); }, 40000);
         }).catch(e => log("Camera Error: " + e.message));
     }
 
@@ -83,7 +75,6 @@
         
         log(`Agent Assessed: ${data.assessment}`);
         
-        // App 3: Trigger Spotify/Jamendo Music Therapy
         if (data.play_music_url) {
             comfortAudio.src = data.play_music_url;
             comfortAudio.play().catch(e => console.log("Audio block", e));
@@ -92,9 +83,7 @@
             comfortAudio.pause();
         }
 
-        // Bounded TTS
         if (VOCAB[data.spoken_code]) speak(VOCAB[data.spoken_code]);
-
       } catch (err) { log("API Error"); }
     }
 
@@ -108,7 +97,6 @@
         if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) { count = 0; return; }
         const lm = results.multiHandLandmarks[0];
         
-        // Basic finger math
         let fingers = 0;
         if (lm[8].y < lm[6].y - 0.04) fingers++;
         if (lm[12].y < lm[10].y - 0.04) fingers++;
@@ -119,11 +107,11 @@
         
         if (gesture !== "NONE") {
           if (stable === gesture) count++; else { stable = gesture; count = 1; }
-          if (count === 25 && !isLocked) { // 1 sec hold
+          if (count === 25 && !isLocked) {
             isLocked = true;
             log(`🎯 Trigger: ${gesture}`);
             dispatchEvent(gesture);
-            setTimeout(() => { isLocked = false; count=0; }, 5000); // 5s cooldown
+            setTimeout(() => { isLocked = false; count=0; }, 5000);
           }
         }
       });
