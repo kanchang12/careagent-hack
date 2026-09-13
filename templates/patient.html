@@ -42,6 +42,7 @@
     };
 
     function log(msg) { logBox.innerHTML = `[${new Date().toLocaleTimeString()}] ${msg}<br>` + logBox.innerHTML; }
+    
     function speak(phrase) {
       if (!window.speechSynthesis) return;
       window.speechSynthesis.cancel();
