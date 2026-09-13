@@ -616,8 +616,9 @@ NO_PATIENT_VISIBLE, SENSOR_UNCLEAR
                 ],
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
-                    temperature=0.1,
-                    max_output_tokens=1000
+                    response_json_schema=GEMINI_RESPONSE_SCHEMA,
+                    temperature=0.0,
+                    max_output_tokens=600
                 )
             )
 
@@ -626,7 +627,7 @@ NO_PATIENT_VISIBLE, SENSOR_UNCLEAR
 
             app.logger.info(
                 f"[{alert_id}] Gemini in {elapsed:.1f}s | "
-                f"raw='{raw_text[:500]}'"
+                f"raw_length={len(raw_text)} | raw={raw_text!r}"
             )
 
             parsed = None
