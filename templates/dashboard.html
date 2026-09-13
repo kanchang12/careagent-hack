@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Care Agent — Dashboard</title>
+  <style>
+    body { font-family: sans-serif; background: #f1f5f9; padding: 20px; }
+    .container { max-width: 1000px; margin: auto; display: grid; grid-template-columns: 2fr 1fr; gap: 20px; }
+    .card { background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 15px;}
+    .alert-box { border-left: 5px solid #ef4444; padding: 10px; background: #fef2f2; margin-bottom: 10px; }
+    .btn { background: #10b981; color: white; border: none; padding: 8px 12px; cursor: pointer; border-radius: 4px; }
+    .gallery { display: flex; gap: 10px; overflow-x: auto; }
+    .gallery img { height: 100px; border-radius: 4px; }
+    .feed { font-family: monospace; font-size: 0.85rem; color: #334155; }
+  </style>
+</head>
+<body>
+  <h1>👨‍⚕️ Care Agent Monitor</h1>
+  <div class="container">
+    <div>
+      <div class="card">
+        <h3>🚨 Active Alerts</h3>
+        <div id="alerts">All clear.</div>
+      </div>
+      <div class="card">
+        <h3>📸 Live Visual Audit</h3>
+        <div class="gallery" id="gallery"></div>
+      </div>
+    </div>
+    <div class="card feed">
+      <h3>📝 System Log</h3>
+      <div id="log"></div>
+    </div>
+  </div>
+
+  <script>
+    async function update() {
+      const res = await fetch('/api/v1/state');
+      const data = await res.json();
+      
+      // Alerts
+      if(data.active_alerts.length === 0) document.getElementById('alerts').innerHTML = "All clear.";
+      else {
+        document.getElementById('alerts').innerHTML = data.active_alerts.map(a => `
+          <div class="alert-box">
+            <strong>${a.gesture} Alert</strong> <br> ${a.assessment} <br>
+            <button class="btn" onclick="ack('${a.alert_id}')" style="margin-top:10px;">Acknowledge & Resolve</button>
+          </div>
+        `).join('');
+      }
+
+      // Images
+      document.getElementById('gallery').innerHTML = data.recent_images.map(img => `<img src="${img.image}">`).join('');
+
+      // Logs
+      document.getElementById('log').innerHTML = data.feed.map(f => `[${f.time}] <b>${f.type}</b>: ${f.message}<br>`).join('');
+    }
+
+    async function ack(id) {
+      await fetch('/api/v1/acknowledge', { method: 'POST', body: JSON.stringify({alert_id: id}) });
+      update();
+    }
+    
+    setInterval(update, 2000);
+    update();
+  </script>
+</body>
+</html>
