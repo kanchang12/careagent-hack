@@ -5,10 +5,12 @@ import base64
 import json
 import threading
 import requests
+import logging
 from datetime import datetime
 from pathlib import Path
 
 from flask import Flask, request, jsonify, render_template, send_from_directory
+from werkzeug.middleware.proxy_fix import ProxyFix
 from dotenv import load_dotenv
 from PIL import Image
 from google import genai
@@ -19,6 +21,18 @@ load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET", "care-agent-v1")
+
+# Docker / Gunicorn Production Fixes
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+
+# Wire Flask logs to Gunicorn's logger so you can actually see them in the terminal
+gunicorn_logger = logging.getLogger('gunicorn.error')
+if gunicorn_logger.handlers:
+    app.logger.handlers = gunicorn_logger.handlers
+    app.logger.setLevel(gunicorn_logger.level)
+else:
+    app.logger.setLevel(logging.INFO)
+
 UPLOAD_DIR = Path("static/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -46,6 +60,7 @@ def tool_send_whatsapp(message):
     to_number = os.getenv("FAMILY_WHATSAPP_TO")
     
     if not token or not phone_id: 
+        app.logger.warning("[WhatsApp] Missing Meta API credentials.")
         return False
         
     url = f"https://graph.facebook.com/v19.0/{phone_id}/messages"
@@ -62,23 +77,31 @@ def tool_send_whatsapp(message):
     
     try:
         response = requests.post(url, headers=headers, json=payload)
-        return response.status_code in [200, 201]
+        if response.status_code in [200, 201]:
+            app.logger.info("[WhatsApp] Sent successfully via Meta Graph API.")
+            return True
+        else:
+            app.logger.error(f"[WhatsApp] Failed: {response.text}")
+            return False
     except Exception as e:
-        print(f"[Meta WhatsApp Exception] {e}")
+        app.logger.error(f"[WhatsApp] Exception: {e}")
         return False
 
 def tool_send_voice_call(reason):
-    if not twilio_client: return False
+    if not twilio_client: 
+        app.logger.warning("[Voice] Missing Twilio credentials.")
+        return False
     try:
         twiml = f"<Response><Say voice='alice'>Emergency Alert. Assessment: {reason}. Please check the dashboard immediately.</Say></Response>"
-        twilio_client.calls.create(
+        call = twilio_client.calls.create(
             twiml=twiml,
             to=os.getenv("FAMILY_PHONE_TO"),
             from_=os.getenv("TWILIO_VOICE_FROM")
         )
+        app.logger.info(f"[Voice] Twilio call dispatched. SID: {call.sid}")
         return True
     except Exception as e:
-        print(f"[Voice Error] {e}")
+        app.logger.error(f"[Voice Error] {e}")
         return False
 
 @app.route("/", methods=["GET", "POST"])
@@ -111,6 +134,7 @@ def process_frame():
         image_bytes = base64.b64decode(raw_b64)
         Image.open(io.BytesIO(image_bytes)).convert("RGB").save(fpath, "JPEG", quality=80)
     except Exception as e:
+        app.logger.error(f"Image save failed: {e}")
         return jsonify({"error": f"Image decode failed: {e}"}), 400
 
     prompt = (
@@ -145,14 +169,16 @@ def process_frame():
 
     if ai_client:
         try:
+            app.logger.info(f"[{alert_id}] Requesting Gemini reasoning...")
             response = ai_client.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=[types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"), prompt],
                 config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2)
             )
             plan = json.loads(response.text.strip())
+            app.logger.info(f"[{alert_id}] Agent Plan: {plan}")
         except Exception as e:
-            print(f"[Gemini Error] {e}")
+            app.logger.error(f"[Gemini Error] {e}")
 
     tools = plan.get("tools_to_execute", {})
     is_emergency = tools.get("voice_call", {}).get("execute", False)
@@ -195,7 +221,9 @@ def acknowledge_alert():
     data = request.get_json(force=True, silent=True) or {}
     with alerts_lock:
         alert = alerts.get(data.get("alert_id"))
-        if alert: alert["status"] = "RESOLVED"
+        if alert: 
+            alert["status"] = "RESOLVED"
+            app.logger.info(f"Alert {data.get('alert_id')} marked as RESOLVED by caregiver.")
     return jsonify({"status": "SUCCESS"})
 
 @app.route("/api/v1/state", methods=["GET", "POST"])
@@ -208,4 +236,5 @@ def get_state():
     return jsonify({"active_alerts": active, "recent_images": recent, "feed": feed})
 
 if __name__ == "__main__":
+    # Standard run for local dev, Gunicorn bypasses this block completely.
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=False, threaded=True)
