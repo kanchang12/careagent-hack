@@ -10,15 +10,14 @@
     video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
     .btn { padding: 16px 24px; font-size: 1.2rem; font-weight: bold; background: #2563eb; color: #fff; border: none; border-radius: 8px; cursor: pointer; margin: 5px; }
     .btn-danger { background: #ef4444; }
+    .btn-stop { background: #dc2626; display: none; margin-top: 20px; font-size: 1.4rem; padding: 20px 40px; }
     #log { font-family: monospace; color: #38bdf8; margin-top: 20px; font-size: 0.9rem; }
-    .dash-link { display: inline-block; margin-bottom: 15px; color: #38bdf8; text-decoration: none; font-weight: bold; }
     .status { font-size: 1.1rem; margin-top: 10px; color: #fbbf24; font-weight: bold; }
   </style>
 </head>
 <body>
 
   <h2>🛡️ Care Guardian Edge</h2>
-  <a href="/dashboard" class="dash-link" target="_blank">↗ Open Caregiver Dashboard</a>
 
   <div class="camera-box"><video id="videoFeed" autoplay playsinline muted></video></div>
   <p>Gestures: 1=Water | 2=Food | 3=Toilet | Fist=EMERGENCY</p>
@@ -26,6 +25,9 @@
 
   <button class="btn" id="startBtn" onclick="initSystem()">Initialize Agent</button>
   <button class="btn btn-danger" id="stopBtn" onclick="stopSystem()" style="display: none;">Stop Agent</button>
+
+  <!-- STOP SIGNAL — only visible when speaker is active -->
+  <button class="btn btn-stop" id="speakerStopBtn" onclick="stopSpeaker()">🔕 STOP EMERGENCY SIGNAL</button>
 
   <div id="log">Waiting to start...</div>
   <audio id="comfortAudio" loop></audio>
@@ -38,6 +40,7 @@
     const logBox = document.getElementById('log');
     const statusBox = document.getElementById('statusBox');
     const comfortAudio = document.getElementById('comfortAudio');
+    const speakerStopBtn = document.getElementById('speakerStopBtn');
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
 
@@ -65,12 +68,12 @@
     }
 
     async function initSystem() {
-      // Unlock speech synthesis inside the user gesture
+      // Unlock speech inside the user gesture
       try {
         const u = new SpeechSynthesisUtterance(" ");
         u.volume = 0;
         window.speechSynthesis.speak(u);
-      } catch (e) { /* ignore */ }
+      } catch (e) {}
 
       document.getElementById('startBtn').style.display = "none";
       document.getElementById('stopBtn').style.display = "inline-block";
@@ -83,7 +86,6 @@
         activeStream = stream;
         video.srcObject = stream;
 
-        // Wait until the video actually has dimensions
         await new Promise(resolve => {
           if (video.videoWidth > 0) return resolve();
           video.onloadedmetadata = () => resolve();
@@ -110,42 +112,51 @@
       comfortAudio.currentTime = 0;
       window.speechSynthesis.cancel();
       isLocked = false;
+      speakerStopBtn.style.display = "none";
       document.getElementById('startBtn').style.display = "inline-block";
       document.getElementById('stopBtn').style.display = "none";
       setStatus("");
       log("🛑 Agent stopped.");
     }
 
+    // ---------- SPEAKER LOOP ----------
+    // Runs every 20s and only stops when the server says speaker is OFF
+    // (which happens when the patient presses STOP).
     function startSpeakerLoop() {
       if (speakerLoop) return;
-      log("🔊 Speaker loop active (every 20s).");
-      setStatus("🚨 Emergency — repeating alert");
-
-      const startedAt = Date.now();
-      let missCount = 0;
+      log("🔊 Speaker loop ON — repeating every 20s until STOP.");
+      setStatus("🚨 Emergency — press STOP when help arrives");
+      speakerStopBtn.style.display = "inline-block";
 
       const tick = async () => {
         try {
           const r = await fetch("/api/v1/patient-loop");
           const d = await r.json();
           if (d.speak) {
-            missCount = 0;
             speak(d.phrase);
-            log(`🔊 "${d.phrase}" (${d.remaining}s left)`);
-            return;
-          }
-          if (Date.now() - startedAt < 5000) return;
-          missCount++;
-          if (missCount >= 2) {
-            log("✅ Caregiver acknowledged. Loop stopped.");
+            log(`🔊 "${d.phrase}"`);
+          } else {
+            log("🔕 Speaker stopped.");
             setStatus("");
+            speakerStopBtn.style.display = "none";
             if (speakerLoop) { clearInterval(speakerLoop); speakerLoop = null; }
           }
-        } catch (e) { /* ignore */ }
+        } catch (e) {}
       };
 
       tick();
       speakerLoop = setInterval(tick, 20000);
+    }
+
+    async function stopSpeaker() {
+      try {
+        await fetch("/api/v1/stop-speaker", { method: "POST" });
+      } catch (e) {}
+      if (speakerLoop) { clearInterval(speakerLoop); speakerLoop = null; }
+      window.speechSynthesis.cancel();
+      speakerStopBtn.style.display = "none";
+      setStatus("");
+      log("🔕 STOP pressed. Signal silenced.");
     }
 
     async function dispatchEvent(gestureName) {
@@ -188,9 +199,8 @@
     // ===================== MEDIAPIPE =====================
     async function initMediaPipe() {
       const hands = new Hands({
-        locateFile: (file) => {
-          return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`;
-        }
+        locateFile: (file) =>
+          `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`
       });
 
       hands.setOptions({
@@ -241,7 +251,6 @@
         }
       });
 
-      // CRITICAL: wait for model to fully load before sending any frames
       try {
         await hands.initialize();
         log("✅ MediaPipe Hands ready.");
@@ -253,11 +262,7 @@
       activeCamera = new Camera(video, {
         onFrame: async () => {
           if (video.videoWidth === 0 || video.videoHeight === 0) return;
-          try {
-            await hands.send({ image: video });
-          } catch (e) {
-            // swallow WASM abort spam
-          }
+          try { await hands.send({ image: video }); } catch (e) {}
         },
         width: 640,
         height: 480
