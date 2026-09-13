@@ -43,10 +43,16 @@ TWILIO_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 twilio_client = TwilioClient(TWILIO_SID, TWILIO_TOKEN) if (TWILIO_SID and TWILIO_TOKEN) else None
 
-alerts = {}            
+alerts = {}
 alerts_lock = threading.Lock()
-events_feed = []       
+events_feed = []
 feed_lock = threading.Lock()
+
+# --- ESCALATION TIMING ---
+ESCALATION_WINDOW_SEC   = 120   # repeat voice for 2 minutes
+ESCALATION_REPEAT_SEC   = 20    # repeat every 20 seconds
+ESCALATION_WHATSAPP_AT  = 120   # WhatsApp at 2 min (once)
+ESCALATION_CALL_AT      = 300   # Voice call at 5 min
 
 def push_feed(entry):
     with feed_lock:
@@ -58,11 +64,11 @@ def tool_send_whatsapp(message):
     token = os.getenv("META_WHATSAPP_TOKEN")
     phone_id = os.getenv("META_PHONE_NUMBER_ID")
     to_number = os.getenv("FAMILY_WHATSAPP_TO")
-    
-    if not token or not phone_id: 
+
+    if not token or not phone_id:
         app.logger.warning("[WhatsApp] Missing Meta API credentials.")
         return False
-        
+
     url = f"https://graph.facebook.com/v19.0/{phone_id}/messages"
     headers = {
         "Authorization": f"Bearer {token}",
@@ -74,7 +80,7 @@ def tool_send_whatsapp(message):
         "type": "text",
         "text": {"body": f"🚨 Care Agent Alert\n{message}\nPlease check the dashboard."}
     }
-    
+
     try:
         response = requests.post(url, headers=headers, json=payload)
         if response.status_code in [200, 201]:
@@ -88,7 +94,7 @@ def tool_send_whatsapp(message):
 
 # --- TOOL 2: TWILIO VOICE ---
 def tool_send_voice_call(reason):
-    if not twilio_client: 
+    if not twilio_client:
         app.logger.warning("[Voice] Missing Twilio credentials.")
         return False
     try:
@@ -110,16 +116,16 @@ def tool_get_jamendo_music():
     if not client_id:
         app.logger.warning("[Jamendo] No Client ID provided. Using fallback track.")
         return "https://prod-1.storage.jamendo.com/?trackid=1890757&format=mp31"
-        
+
     try:
         url = f"https://api.jamendo.com/v3.0/tracks/?client_id={client_id}&format=json&tags=ambient,relaxing&limit=1"
         response = requests.get(url, timeout=5)
         data = response.json()
-        
+
         if data.get("results") and len(data["results"]) > 0:
             app.logger.info("[Jamendo] Live track retrieved via API.")
             return data["results"][0]["audio"]
-            
+
         return "https://prod-1.storage.jamendo.com/?trackid=1890757&format=mp31"
     except Exception as e:
         app.logger.error(f"[Jamendo Error] {e}")
@@ -130,16 +136,16 @@ def tool_send_to_webhook(alert_id, gesture, assessment, raw_b64):
     webhook_url = os.getenv("MAKE_WEBHOOK_URL")
     if not webhook_url:
         return False
-        
+
     payload = {
         "alert_id": alert_id,
         "timestamp": datetime.utcnow().isoformat(),
         "gesture": gesture,
         "assessment": assessment,
         "filename": f"{alert_id}.jpg",
-        "image_base64": raw_b64 
+        "image_base64": raw_b64
     }
-    
+
     try:
         response = requests.post(webhook_url, json=payload, timeout=5)
         if response.status_code in [200, 201]:
@@ -151,14 +157,63 @@ def tool_send_to_webhook(alert_id, gesture, assessment, raw_b64):
         app.logger.error(f"[Webhook Exception] {e}")
         return False
 
-# --- ESCALATION TIMER ---
+# --- ESCALATION TIMER (3 STAGES) ---
 def escalation_timer(alert_id, message):
-    time.sleep(30)
+    """
+    Stage 1 (0-120s): Patient speaker repeats phrase every 20 seconds.
+    Stage 2 (120s):   Send WhatsApp ONCE (only if still unresolved).
+    Stage 3 (300s):   Place Twilio voice call (only if still unresolved).
+    Any caregiver ACK at any time stops everything immediately.
+    """
+    start = time.time()
+    whatsapp_sent = False
+    call_sent = False
+
+    # Register the speak window on the alert so /api/v1/patient-loop can find it
     with alerts_lock:
-        alert = alerts.get(alert_id)
-        if alert and alert["status"] != "RESOLVED":
+        if alert_id in alerts:
+            alerts[alert_id]["speak_until_ts"] = start + ESCALATION_WINDOW_SEC
+            alerts[alert_id]["speak_phrase"] = (
+                "Emergency detected. Please stay calm. Help is coming."
+            )
+
+    push_feed({
+        "time": datetime.utcnow().strftime("%H:%M:%S"),
+        "type": "Bluetooth Speaker",
+        "message": "Repeat loop started (20s interval, 2 min window)."
+    })
+
+    while True:
+        time.sleep(1)
+
+        with alerts_lock:
+            alert = alerts.get(alert_id)
+            if not alert or alert["status"] == "RESOLVED":
+                app.logger.info(f"[{alert_id}] Escalation stopped (resolved).")
+                return
+
+        elapsed = time.time() - start
+
+        # Stage 2 — WhatsApp once after 2 minutes
+        if not whatsapp_sent and elapsed >= ESCALATION_WHATSAPP_AT:
+            whatsapp_sent = True
             tool_send_whatsapp(message)
-            push_feed({"time": datetime.utcnow().strftime("%H:%M:%S"), "type": "Meta WhatsApp", "message": "Pop-up ignored. Escalated to WhatsApp."})
+            push_feed({
+                "time": datetime.utcnow().strftime("%H:%M:%S"),
+                "type": "Meta WhatsApp",
+                "message": "2 min elapsed. WhatsApp alert sent once."
+            })
+
+        # Stage 3 — Voice call after 5 minutes, then exit
+        if not call_sent and elapsed >= ESCALATION_CALL_AT:
+            call_sent = True
+            tool_send_voice_call(f"Unresolved emergency: {message}")
+            push_feed({
+                "time": datetime.utcnow().strftime("%H:%M:%S"),
+                "type": "Twilio Voice",
+                "message": "5 min elapsed. Emergency call dispatched."
+            })
+            return
 
 # --- VIEWS & ROUTES ---
 @app.route("/", methods=["GET", "POST"])
@@ -173,11 +228,34 @@ def dashboard_view():
 def uploaded_file(filename):
     return send_from_directory(UPLOAD_DIR, filename)
 
+# --- PATIENT SPEAKER LOOP ENDPOINT ---
+@app.route("/api/v1/patient-loop", methods=["GET", "POST"])
+def patient_loop():
+    """
+    The patient browser polls this every 20s.
+    Returns whether the Bluetooth speaker should keep repeating.
+    Stops automatically when the caregiver ACKs (status == RESOLVED)
+    or when the 2-minute window expires.
+    """
+    now = time.time()
+    with alerts_lock:
+        for a in alerts.values():
+            if a["status"] == "RESOLVED":
+                continue
+            if a.get("speak_until_ts", 0) > now:
+                return jsonify({
+                    "speak": True,
+                    "phrase": a.get("speak_phrase", "Emergency detected. Help is on the way."),
+                    "alert_id": a["alert_id"],
+                    "remaining": int(a["speak_until_ts"] - now)
+                })
+    return jsonify({"speak": False})
+
 @app.route("/api/v1/process-frame", methods=["GET", "POST"])
 def process_frame():
     data = request.get_json(force=True, silent=True) or {}
     snapshot_b64 = data.get("snapshot")
-    gesture_input = data.get("gesture", "NONE").upper() 
+    gesture_input = data.get("gesture", "NONE").upper()
 
     if not snapshot_b64:
         return jsonify({"error": "snapshot missing"}), 400
@@ -233,11 +311,11 @@ def process_frame():
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                     temperature=0.0,
-                    max_output_tokens=1200 # Increased to prevent truncation 
+                    max_output_tokens=1200
                 )
             )
             raw_text = response.text.strip()
-            
+
             parsed = None
             try:
                 parsed = json.loads(raw_text)
@@ -251,10 +329,10 @@ def process_frame():
                         parsed = json.loads(candidate)
                     except json.JSONDecodeError as nested_error:
                         app.logger.error(f"[{alert_id}] Extracted JSON decode error: {nested_error.msg}. Candidate: {candidate!r}")
-            
+
             if isinstance(parsed, dict) and parsed:
                 plan.update(parsed)
-                
+
         except Exception as e:
             app.logger.error(f"[Gemini Error] {e}")
 
@@ -281,18 +359,24 @@ def process_frame():
             "assessment": plan.get("assessment", ""),
             "image": f"/uploads/{fname}"
         }
-    
+
     # --- Execute Tools ---
-    if tools.get("whatsapp_alert", {}).get("execute", False):
-        push_feed({"time": datetime.utcnow().strftime("%H:%M:%S"), "type": "Dashboard", "message": "Pop-up triggered. Awaiting caregiver..."})
+    any_alert = (
+        tools.get("whatsapp_alert", {}).get("execute", False)
+        or tools.get("voice_call", {}).get("execute", False)
+    )
+
+    if any_alert:
+        push_feed({
+            "time": datetime.utcnow().strftime("%H:%M:%S"),
+            "type": "Dashboard",
+            "message": "Alert raised. Speaker loop + escalation timer started."
+        })
         threading.Thread(
-            target=escalation_timer, 
-            args=(alert_id, tools["whatsapp_alert"].get("message", "Patient needs attention."))
+            target=escalation_timer,
+            args=(alert_id, tools.get("whatsapp_alert", {}).get("message", "Patient needs attention.")),
+            daemon=True
         ).start()
-        
-    if is_emergency:
-        tool_send_voice_call(tools["voice_call"].get("reason", "Critical alert."))
-        push_feed({"time": datetime.utcnow().strftime("%H:%M:%S"), "type": "Twilio Voice", "message": "Escalation Dialed."})
 
     music_url = tool_get_jamendo_music() if tools.get("comfort_music", {}).get("execute", False) else None
     if music_url:
@@ -317,8 +401,10 @@ def acknowledge_alert():
     data = request.get_json(force=True, silent=True) or {}
     with alerts_lock:
         alert = alerts.get(data.get("alert_id"))
-        if alert: 
+        if alert:
             alert["status"] = "RESOLVED"
+            # Kill the speaker loop instantly
+            alert["speak_until_ts"] = 0
             app.logger.info(f"Alert {data.get('alert_id')} marked RESOLVED.")
     return jsonify({"status": "SUCCESS"})
 
