@@ -49,17 +49,22 @@ alerts_lock = threading.Lock()
 events_feed = []
 feed_lock = threading.Lock()
 
-ESCALATION_WINDOW_SEC  = 120
-ESCALATION_CALL_AT     = 300
-PROCESSING_LOCK_SEC    = 300
+# ---------- GLOBAL PROCESSING LOCK (independent of speaker) ----------
+LOCK = {"until": 0.0}
+lock_mutex = threading.Lock()
+
+# ---------- SPEAKER FLAG (independent, manual stop only) ----------
+SPEAKER = {"on": False, "phrase": "Emergency detected. Please stay calm. Help is coming."}
+speaker_mutex = threading.Lock()
+
+ESCALATION_CALL_AT  = 300
+PROCESSING_LOCK_SEC = 300
 
 app.logger.info("=" * 60)
 app.logger.info("[BOOT] Care Agent starting")
-app.logger.info(f"[BOOT] GEMINI_MODEL        = {GEMINI_MODEL}")
-app.logger.info(f"[BOOT] ai_client           = {'OK' if ai_client else 'MISSING'}")
-app.logger.info(f"[BOOT] twilio_client       = {'OK' if twilio_client else 'MISSING'}")
-app.logger.info(f"[BOOT] TWILIO_VOICE_FROM   = {TWILIO_FROM}")
-app.logger.info(f"[BOOT] FAMILY_PHONE_TO     = {FAMILY_PHONE}")
+app.logger.info(f"[BOOT] GEMINI_MODEL      = {GEMINI_MODEL}")
+app.logger.info(f"[BOOT] ai_client         = {'OK' if ai_client else 'MISSING'}")
+app.logger.info(f"[BOOT] twilio_client     = {'OK' if twilio_client else 'MISSING'}")
 app.logger.info("=" * 60)
 
 
@@ -70,6 +75,43 @@ def push_feed(entry):
     app.logger.info(f"[FEED] {entry.get('type')}: {entry.get('message')}")
 
 
+def lock_is_on():
+    with lock_mutex:
+        return LOCK["until"] > time.time()
+
+def lock_remaining():
+    with lock_mutex:
+        return max(0, int(LOCK["until"] - time.time()))
+
+def lock_on(seconds):
+    with lock_mutex:
+        LOCK["until"] = time.time() + seconds
+    app.logger.info(f"[LOCK] ON for {seconds}s")
+
+def lock_off():
+    with lock_mutex:
+        LOCK["until"] = 0.0
+    app.logger.info("[LOCK] OFF")
+
+
+def speaker_is_on():
+    with speaker_mutex:
+        return SPEAKER["on"]
+
+def speaker_on(phrase=None):
+    with speaker_mutex:
+        SPEAKER["on"] = True
+        if phrase:
+            SPEAKER["phrase"] = phrase
+    app.logger.info("[SPEAKER] ON — will repeat every 20s until stopped.")
+
+def speaker_off():
+    with speaker_mutex:
+        SPEAKER["on"] = False
+    app.logger.info("[SPEAKER] OFF (manual stop).")
+
+
+# ---------------- TOOLS ----------------
 def tool_send_whatsapp(message):
     token = os.getenv("META_WHATSAPP_TOKEN")
     phone_id = os.getenv("META_PHONE_NUMBER_ID")
@@ -151,6 +193,7 @@ def tool_send_to_webhook(alert_id, gesture, assessment, raw_b64):
         return False
 
 
+# ---------------- ESCALATION (for non-emergency 5 min call) ----------------
 def escalation_timer(alert_id, message, is_emergency):
     start = time.time()
     call_sent = is_emergency
@@ -164,20 +207,6 @@ def escalation_timer(alert_id, message, is_emergency):
             alert = alerts.get(alert_id)
             if not alert:
                 return
-            resolved = alert["status"] == "RESOLVED"
-
-        if resolved:
-            with alerts_lock:
-                if alert_id in alerts:
-                    alerts[alert_id]["processing_locked"] = False
-                    alerts[alert_id]["lock_until_ts"] = 0
-            app.logger.info(f"[ESCALATION {alert_id}] Resolved. Stopping.")
-            push_feed({
-                "time": datetime.utcnow().strftime("%H:%M:%S"),
-                "type": "Caregiver",
-                "message": "Acknowledged. Escalation cancelled."
-            })
-            return
 
         if (not is_emergency) and (not call_sent) and elapsed >= ESCALATION_CALL_AT:
             call_sent = True
@@ -188,53 +217,62 @@ def escalation_timer(alert_id, message, is_emergency):
                 "type": "Twilio Voice",
                 "message": f"Voice call {'dispatched' if ok else 'FAILED'} at 5 min."
             })
-            with alerts_lock:
-                if alert_id in alerts:
-                    alerts[alert_id]["processing_locked"] = False
-                    alerts[alert_id]["lock_until_ts"] = 0
             return
 
         if elapsed >= ESCALATION_CALL_AT:
-            with alerts_lock:
-                if alert_id in alerts:
-                    alerts[alert_id]["processing_locked"] = False
-                    alerts[alert_id]["lock_until_ts"] = 0
-            app.logger.info(f"[ESCALATION {alert_id}] 5 min elapsed. Lock released.")
+            app.logger.info(f"[ESCALATION {alert_id}] 5 min elapsed. Done.")
             return
 
 
+# ---------------- VIEWS ----------------
 @app.route("/", methods=["GET", "POST"])
 def patient_view():
     return render_template("patient.html")
-
-@app.route("/dashboard", methods=["GET", "POST"])
-def dashboard_view():
-    return render_template("dashboard.html")
 
 @app.route("/uploads/<path:filename>", methods=["GET", "POST"])
 def uploaded_file(filename):
     return send_from_directory(UPLOAD_DIR, filename)
 
 
+# ---------------- SPEAKER LOOP ENDPOINT ----------------
 @app.route("/api/v1/patient-loop", methods=["GET", "POST"])
 def patient_loop():
-    now = time.time()
-    with alerts_lock:
-        for a in alerts.values():
-            if a["status"] == "RESOLVED":
-                continue
-            if a.get("speak_until_ts", 0) > now:
-                return jsonify({
-                    "speak": True,
-                    "phrase": a.get("speak_phrase", "Emergency detected. Help is on the way."),
-                    "alert_id": a["alert_id"],
-                    "remaining": int(a["speak_until_ts"] - now)
-                })
+    # Returns ON until manually stopped via /api/v1/stop-speaker
+    if speaker_is_on():
+        with speaker_mutex:
+            phrase = SPEAKER["phrase"]
+        return jsonify({"speak": True, "phrase": phrase})
     return jsonify({"speak": False})
 
 
+@app.route("/api/v1/stop-speaker", methods=["GET", "POST"])
+def stop_speaker():
+    speaker_off()
+    lock_off()  # stop button also releases the processing lock
+    push_feed({
+        "time": datetime.utcnow().strftime("%H:%M:%S"),
+        "type": "Patient",
+        "message": "STOP pressed. Speaker + lock cleared."
+    })
+    return jsonify({"status": "STOPPED"})
+
+
+# ---------------- MAIN FRAME PROCESSOR ----------------
 @app.route("/api/v1/process-frame", methods=["GET", "POST"])
 def process_frame():
+    # HARD GATE — if locked, do nothing else
+    if lock_is_on():
+        remaining = lock_remaining()
+        app.logger.info(f"[FRAME] BLOCKED — {remaining}s left.")
+        return jsonify({
+            "locked": True,
+            "remaining": remaining,
+            "assessment": f"Processing paused. {remaining}s left.",
+            "spoken_code": "NONE",
+            "play_music_url": None,
+            "alert_id": None
+        }), 200
+
     data = request.get_json(force=True, silent=True) or {}
     snapshot_b64 = data.get("snapshot")
     gesture_input = data.get("gesture", "NONE").upper()
@@ -243,24 +281,6 @@ def process_frame():
 
     if not snapshot_b64:
         return jsonify({"error": "snapshot missing"}), 400
-
-    now = time.time()
-    with alerts_lock:
-        for a in alerts.values():
-            if a["status"] == "RESOLVED":
-                continue
-            lock_until = a.get("lock_until_ts", 0)
-            if lock_until > now:
-                remaining = int(lock_until - now)
-                app.logger.info(f"[FRAME] BLOCKED — {remaining}s left.")
-                return jsonify({
-                    "alert_id": a["alert_id"],
-                    "assessment": f"Processing paused. {remaining}s left.",
-                    "spoken_code": "NONE",
-                    "play_music_url": None,
-                    "locked": True,
-                    "remaining": remaining
-                })
 
     alert_id = f"ALT-{int(time.time())}"
     fname = f"{alert_id}.jpg"
@@ -322,7 +342,6 @@ def process_frame():
             )
             raw_text = (response.text or "").strip()
             app.logger.info(f"[{alert_id}] Gemini in {time.time()-t0:.1f}s")
-
             parsed = None
             try:
                 parsed = json.loads(raw_text)
@@ -366,12 +385,13 @@ def process_frame():
             "assessment": plan.get("assessment", ""),
             "image": f"/uploads/{fname}"
         }
-        if any_alert:
-            alerts[alert_id]["speak_until_ts"] = time.time() + ESCALATION_WINDOW_SEC
-            alerts[alert_id]["speak_phrase"] = "Emergency detected. Please stay calm. Help is coming."
-            alerts[alert_id]["processing_locked"] = True
-            alerts[alert_id]["lock_until_ts"] = time.time() + PROCESSING_LOCK_SEC
-            app.logger.info(f"[{alert_id}] EVENT RAISED — emergency={is_emergency}")
+
+    if any_alert:
+        # Turn on the global processing lock for 5 minutes
+        lock_on(PROCESSING_LOCK_SEC)
+        # Turn on the speaker — it stays on until patient presses STOP
+        speaker_on("Emergency detected. Please stay calm. Help is coming.")
+        app.logger.info(f"[{alert_id}] EVENT RAISED — emergency={is_emergency}. Lock ON, Speaker ON.")
 
     if is_emergency:
         reason = tools.get("voice_call", {}).get("reason", "Critical alert.")
@@ -399,11 +419,6 @@ def process_frame():
         })
 
     if any_alert:
-        push_feed({
-            "time": datetime.utcnow().strftime("%H:%M:%S"),
-            "type": "Dashboard",
-            "message": "Alert raised. Timer started."
-        })
         threading.Thread(
             target=escalation_timer,
             args=(alert_id, tools.get("whatsapp_alert", {}).get("message", "Patient needs attention."), is_emergency),
@@ -428,21 +443,6 @@ def process_frame():
         "play_music_url": music_url,
         "locked": False
     })
-
-
-@app.route("/api/v1/acknowledge", methods=["GET", "POST"])
-def acknowledge_alert():
-    data = request.get_json(force=True, silent=True) or {}
-    aid = data.get("alert_id")
-    with alerts_lock:
-        alert = alerts.get(aid)
-        if alert:
-            alert["status"] = "RESOLVED"
-            alert["speak_until_ts"] = 0
-            alert["processing_locked"] = False
-            alert["lock_until_ts"] = 0
-            app.logger.info(f"[ACK] Alert {aid} RESOLVED.")
-    return jsonify({"status": "SUCCESS"})
 
 
 @app.route("/api/v1/state", methods=["GET", "POST"])
