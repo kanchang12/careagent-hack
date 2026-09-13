@@ -363,8 +363,7 @@ def process_frame():
                 ),
             )
             response = chat.send_message(
-                [types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"), prompt],
-                request_options={"timeout": 20}
+                [types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"), prompt]
             )
             raw_text = (response.text or "").strip()
             app.logger.info(f"[{alert_id}] Gemini responded in {time.time()-t0:.1f}s, {len(raw_text)} chars")
