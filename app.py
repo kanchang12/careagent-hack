@@ -55,7 +55,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 # CONFIG
 # ═══════════════════════════════════════════════════════════════════
 GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL     = os.getenv("GEMINI_MODEL")
+GEMINI_MODEL     = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 TWILIO_SID       = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_TOKEN     = os.getenv("TWILIO_AUTH_TOKEN")
 ESCALATION_DELAY = int(os.getenv("ESCALATION_DELAY", "30"))
@@ -215,8 +215,8 @@ def tool_send_to_webhook(alert_id: str, gesture: str, assessment: str, raw_b64: 
 # ESCALATION LADDER
 # ═══════════════════════════════════════════════════════════════════
 def escalation_timer(alert_id: str, message: str):
-    """Cancellable 30-second escalation. If caregiver acknowledges before
-    the timer expires, the WhatsApp message is silently aborted."""
+    """Cancellable escalation. If caregiver acknowledges before timer
+    expires, the WhatsApp message is silently aborted."""
     app.logger.info(f"[{alert_id}] Escalation timer armed ({ESCALATION_DELAY}s)")
     time.sleep(ESCALATION_DELAY)
 
@@ -248,8 +248,6 @@ def escalation_timer(alert_id: str, message: str):
 # GESTURE → PLAN (HARD RULE ENGINE)
 # ═══════════════════════════════════════════════════════════════════
 def build_plan(gesture: str) -> dict:
-    """Deterministic plan from gesture. Gemini only refines the message,
-    never the safety booleans."""
     if gesture == "FIST":
         return {"whatsapp": True, "voice": True, "music": True,
                 "spoken": "EMERGENCY_DISPATCHED", "severity": "critical",
@@ -270,27 +268,27 @@ def build_plan(gesture: str) -> dict:
 # ═══════════════════════════════════════════════════════════════════
 # ROUTES
 # ═══════════════════════════════════════════════════════════════════
-@app.route("/")
+@app.route("/", methods=["GET", "POST"])
 def patient_view():
     return render_template("patient.html")
 
 
-@app.route("/dashboard")
+@app.route("/dashboard", methods=["GET", "POST"])
 def dashboard_view():
     return render_template("dashboard.html")
 
 
-@app.route("/uploads/<path:filename>")
+@app.route("/uploads/<path:filename>", methods=["GET", "POST"])
 def uploaded_file(filename):
     return send_from_directory(UPLOAD_DIR, filename)
 
 
-@app.route("/health")
+@app.route("/health", methods=["GET", "POST"])
 def health():
     return jsonify({"status": "ok", "time": datetime.utcnow().isoformat()})
 
 
-@app.route("/api/v1/debug")
+@app.route("/api/v1/debug", methods=["GET", "POST"])
 def debug_env():
     return jsonify({
         "gemini": bool(GEMINI_API_KEY),
@@ -311,7 +309,7 @@ def debug_env():
     })
 
 
-@app.route("/api/v1/state")
+@app.route("/api/v1/state", methods=["GET", "POST"])
 def get_state():
     with alerts_lock:
         all_alerts = list(alerts.values())
@@ -332,9 +330,9 @@ def get_state():
     })
 
 
-@app.route("/api/v1/acknowledge",  methods=["POST", "GET"])
+@app.route("/api/v1/acknowledge", methods=["GET", "POST"])
 def acknowledge_alert():
-    data = request.get_json(force=True, silent=True) or {}
+    data = request.get_json(force=True, silent=True) or request.args.to_dict() or {}
     alert_id = data.get("alert_id")
     with alerts_lock:
         alert = alerts.get(alert_id)
@@ -351,7 +349,7 @@ def acknowledge_alert():
     return jsonify({"status": "SUCCESS", "alert_id": alert_id})
 
 
-@app.route("/api/v1/process-frame",  methods=["POST", "GET"])
+@app.route("/api/v1/process-frame", methods=["GET", "POST"])
 def process_frame():
     bump_stat("total_frames")
     data = request.get_json(force=True, silent=True) or {}
@@ -376,7 +374,6 @@ def process_frame():
 
     app.logger.info(f"[{alert_id}] gesture={gesture}")
 
-    # Hard rule plan
     plan = build_plan(gesture)
     assessment = f"Gesture detected: {gesture}"
 
@@ -415,7 +412,6 @@ def process_frame():
         except Exception as e:
             app.logger.error(f"[{alert_id}] Gemini error: {e}")
 
-    # Status
     if plan["voice"]:
         status = "ESCALATED"
     elif plan["whatsapp"]:
@@ -423,7 +419,6 @@ def process_frame():
     else:
         status = "RESOLVED"
 
-    # Store alert
     with alerts_lock:
         alerts[alert_id] = {
             "alert_id": alert_id,
@@ -440,7 +435,6 @@ def process_frame():
 
     # ─── EXECUTE TOOLS ───
 
-    # WhatsApp escalation (deferred, cancellable)
     if plan["whatsapp"]:
         push_feed({
             "type": "Dashboard",
@@ -454,7 +448,6 @@ def process_frame():
             name=f"escalate-{alert_id}",
         ).start()
 
-    # Voice call (immediate)
     if plan["voice"]:
         ok = tool_send_voice_call(f"Emergency gesture: {gesture}. {assessment}")
         push_feed({
@@ -463,7 +456,6 @@ def process_frame():
             "severity": "danger" if ok else "warning",
         })
 
-    # Music (immediate)
     music_url = None
     if plan["music"]:
         music_url = tool_get_jamendo_music()
@@ -474,7 +466,6 @@ def process_frame():
                 "severity": "info",
             })
 
-    # Make.com webhook (only explicit gestures)
     if gesture != "NONE":
         ok = tool_send_to_webhook(alert_id, gesture, assessment, raw_b64)
         push_feed({
@@ -483,7 +474,6 @@ def process_frame():
             "severity": "success" if ok else "warning",
         })
 
-    # Watchdog feed
     if status == "RESOLVED":
         push_feed({"type": "WATCHDOG", "message": f"Routine check safe ({gesture}).", "severity": "safe"})
 
@@ -503,6 +493,7 @@ def process_frame():
 if __name__ == "__main__":
     app.logger.info("=" * 60)
     app.logger.info("🛡  Guardian Angel — Care Agent starting")
+    app.logger.info(f"   Gemini model: {GEMINI_MODEL}")
     app.logger.info(f"   Gemini: {'✅' if ai_client else '❌'}")
     app.logger.info(f"   Twilio: {'✅' if twilio_client else '❌'}")
     app.logger.info(f"   Escalation delay: {ESCALATION_DELAY}s")
