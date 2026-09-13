@@ -1,28 +1,13 @@
-"""
-Guardian Angel — Autonomous Elderly Care Agent
-================================================
-Multi-App AI Agent Hackathon submission.
-
-External apps integrated:
-  1. Google Gemini (multimodal vision reasoning)
-  2. Meta WhatsApp Cloud API (escalation messaging)
-  3. Twilio Voice (emergency phone call)
-  4. Jamendo Music API (therapeutic audio)
-  5. Make.com (webhook → Google Drive snapshot archive)
-"""
-
 import os
 import io
 import time
 import base64
 import json
-import random
 import threading
 import requests
 import logging
 from datetime import datetime
 from pathlib import Path
-from collections import deque
 
 from flask import Flask, request, jsonify, render_template, send_from_directory
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -32,16 +17,13 @@ from google import genai
 from google.genai import types
 from twilio.rest import Client as TwilioClient
 
-# ═══════════════════════════════════════════════════════════════════
-# BOOTSTRAP
-# ═══════════════════════════════════════════════════════════════════
 load_dotenv()
 
 app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET", "guardian-angel-v1")
+app.secret_key = os.getenv("FLASK_SECRET", "care-agent-v1")
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
-gunicorn_logger = logging.getLogger("gunicorn.error")
+gunicorn_logger = logging.getLogger('gunicorn.error')
 if gunicorn_logger.handlers:
     app.logger.handlers = gunicorn_logger.handlers
     app.logger.setLevel(gunicorn_logger.level)
@@ -51,144 +33,122 @@ else:
 UPLOAD_DIR = Path("static/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-# ═══════════════════════════════════════════════════════════════════
-# CONFIG
-# ═══════════════════════════════════════════════════════════════════
-GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL     = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
-TWILIO_SID       = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_TOKEN     = os.getenv("TWILIO_AUTH_TOKEN")
-ESCALATION_DELAY = int(os.getenv("ESCALATION_DELAY", "30"))
+# ─── Configs ───
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")   # faster vision model
+TWILIO_SID     = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_TOKEN   = os.getenv("TWILIO_AUTH_TOKEN")
 
-ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+# ─── ESCALATION MATRIX (Thing 2) ───
+WHATSAPP_AFTER_SEC = 120   # 2 minutes
+VOICE_AFTER_SEC    = 300   # 5 minutes
+
+ai_client     = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 twilio_client = TwilioClient(TWILIO_SID, TWILIO_TOKEN) if (TWILIO_SID and TWILIO_TOKEN) else None
 
-# ═══════════════════════════════════════════════════════════════════
-# SHARED STATE
-# ═══════════════════════════════════════════════════════════════════
-alerts: dict = {}
-alerts_lock = threading.Lock()
+alerts       = {}
+alerts_lock  = threading.Lock()
+events_feed  = []
+feed_lock    = threading.Lock()
 
-events_feed: deque = deque(maxlen=200)
-feed_lock = threading.Lock()
-
-stats = {
-    "total_frames": 0, "total_alerts": 0, "whatsapp_sent": 0,
-    "voice_calls": 0, "music_plays": 0, "webhooks_sent": 0,
-    "acknowledged": 0, "escalated": 0,
-    "started_at": datetime.utcnow().isoformat(),
-}
-stats_lock = threading.Lock()
+# ─── Bluetooth speaker command queue (dashboard polls this) ───
+speaker_queue = []
+speaker_lock  = threading.Lock()
 
 
-def bump_stat(key: str, by: int = 1):
-    with stats_lock:
-        stats[key] = stats.get(key, 0) + by
-
-
-def push_feed(entry: dict):
-    entry.setdefault("time", datetime.utcnow().strftime("%H:%M:%S"))
-    entry.setdefault("ts", datetime.utcnow().isoformat())
+def push_feed(entry):
     with feed_lock:
-        events_feed.appendleft(entry)
+        events_feed.insert(0, entry)
+        del events_feed[100:]
 
 
-# ═══════════════════════════════════════════════════════════════════
+def push_speaker_command(cmd):
+    with speaker_lock:
+        speaker_queue.append({**cmd, "ts": time.time()})
+
+
+# ═══════════════════════════════════════════════════════════════
 # TOOL 1 — META WHATSAPP
-# ═══════════════════════════════════════════════════════════════════
-def tool_send_whatsapp(message: str) -> bool:
+# ═══════════════════════════════════════════════════════════════
+def tool_send_whatsapp(message):
     token     = os.getenv("META_WHATSAPP_TOKEN")
     phone_id  = os.getenv("META_PHONE_NUMBER_ID")
     to_number = os.getenv("FAMILY_WHATSAPP_TO")
 
-    if not all([token, phone_id, to_number]):
-        app.logger.warning(f"[WhatsApp] Missing creds: token={bool(token)} phone_id={bool(phone_id)} to={bool(to_number)}")
+    if not token or not phone_id:
+        app.logger.warning("[WhatsApp] Missing Meta API credentials.")
         return False
 
     url = f"https://graph.facebook.com/v19.0/{phone_id}/messages"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
     payload = {
         "messaging_product": "whatsapp",
         "to": to_number,
         "type": "text",
-        "text": {"body": f"🚨 Guardian Angel Alert\n{message}\nCheck dashboard immediately."},
+        "text": {"body": f"🚨 Care Agent Alert\n{message}\nPlease check the dashboard."}
     }
 
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=10)
-        if r.status_code in (200, 201):
-            app.logger.info("[WhatsApp] Sent ✅")
-            bump_stat("whatsapp_sent")
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        if response.status_code in [200, 201]:
+            app.logger.info("[WhatsApp] Sent successfully via Meta Graph API.")
             return True
-        app.logger.error(f"[WhatsApp] HTTP {r.status_code}: {r.text[:200]}")
+        app.logger.error(f"[WhatsApp Error] {response.text}")
         return False
     except Exception as e:
-        app.logger.error(f"[WhatsApp] Exception: {e}")
+        app.logger.error(f"[WhatsApp Exception] {e}")
         return False
 
 
-# ═══════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 # TOOL 2 — TWILIO VOICE
-# ═══════════════════════════════════════════════════════════════════
-def tool_send_voice_call(reason: str) -> bool:
+# ═══════════════════════════════════════════════════════════════
+def tool_send_voice_call(reason):
     if not twilio_client:
-        app.logger.warning("[Voice] Twilio client not configured.")
+        app.logger.warning("[Voice] Missing Twilio credentials.")
         return False
     try:
-        twiml = (
-            "<Response><Say voice='alice'>"
-            f"Emergency Alert from Guardian Angel. {reason}. "
-            "Please check the caregiver dashboard immediately."
-            "</Say></Response>"
-        )
+        twiml = f"<Response><Say voice='alice'>Emergency Alert. {reason}. Please check the dashboard immediately.</Say></Response>"
         call = twilio_client.calls.create(
             twiml=twiml,
             to=os.getenv("FAMILY_PHONE_TO"),
-            from_=os.getenv("TWILIO_VOICE_FROM"),
+            from_=os.getenv("TWILIO_VOICE_FROM")
         )
-        app.logger.info(f"[Voice] Call dispatched. SID={call.sid}")
-        bump_stat("voice_calls")
+        app.logger.info(f"[Voice] Twilio call dispatched. SID: {call.sid}")
         return True
     except Exception as e:
-        app.logger.error(f"[Voice] Exception: {e}")
+        app.logger.error(f"[Voice Error] {e}")
         return False
 
 
-# ═══════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 # TOOL 3 — JAMENDO MUSIC
-# ═══════════════════════════════════════════════════════════════════
-def tool_get_jamendo_music() -> str:
-    fallback = "https://prod-1.storage.jamendo.com/?trackid=1890757&format=mp31"
+# ═══════════════════════════════════════════════════════════════
+def tool_get_jamendo_music():
     client_id = os.getenv("JAMENDO_CLIENT_ID")
     if not client_id:
-        app.logger.warning("[Jamendo] No client ID. Using fallback.")
-        return fallback
+        return "https://prod-1.storage.jamendo.com/?trackid=1890757&format=mp31"
     try:
-        url = (
-            f"https://api.jamendo.com/v3.0/tracks/?client_id={client_id}"
-            f"&format=json&tags=ambient,relaxing,calm&limit=5&audioformat=mp31"
-        )
-        r = requests.get(url, timeout=6)
-        data = r.json()
-        results = data.get("results") or []
-        if results:
-            track = random.choice(results)
-            app.logger.info(f"[Jamendo] Track: {track.get('name')} by {track.get('artist_name')}")
-            bump_stat("music_plays")
-            return track["audio"]
-        return fallback
+        url = f"https://api.jamendo.com/v3.0/tracks/?client_id={client_id}&format=json&tags=ambient,relaxing&limit=1"
+        response = requests.get(url, timeout=5)
+        data = response.json()
+        if data.get("results") and len(data["results"]) > 0:
+            return data["results"][0]["audio"]
+        return "https://prod-1.storage.jamendo.com/?trackid=1890757&format=mp31"
     except Exception as e:
-        app.logger.error(f"[Jamendo] Exception: {e}")
-        return fallback
+        app.logger.error(f"[Jamendo Error] {e}")
+        return "https://prod-1.storage.jamendo.com/?trackid=1890757&format=mp31"
 
 
-# ═══════════════════════════════════════════════════════════════════
-# TOOL 4 — MAKE.COM → GOOGLE DRIVE
-# ═══════════════════════════════════════════════════════════════════
-def tool_send_to_webhook(alert_id: str, gesture: str, assessment: str, raw_b64: str) -> bool:
+# ═══════════════════════════════════════════════════════════════
+# TOOL 4 — MAKE.COM WEBHOOK
+# ═══════════════════════════════════════════════════════════════
+def tool_send_to_webhook(alert_id, gesture, assessment, raw_b64):
     webhook_url = os.getenv("MAKE_WEBHOOK_URL")
     if not webhook_url:
-        app.logger.error("[Webhook] MAKE_WEBHOOK_URL not set.")
         return False
     payload = {
         "alert_id": alert_id,
@@ -196,78 +156,101 @@ def tool_send_to_webhook(alert_id: str, gesture: str, assessment: str, raw_b64: 
         "gesture": gesture,
         "assessment": assessment,
         "filename": f"{alert_id}.jpg",
-        "image_base64": raw_b64,
+        "image_base64": raw_b64
     }
     try:
-        app.logger.info(f"[Webhook] POST → {webhook_url[:50]}...")
-        r = requests.post(webhook_url, json=payload, timeout=10)
-        app.logger.info(f"[Webhook] {r.status_code} {r.text[:120]}")
-        if r.status_code in (200, 201, 202, 204):
-            bump_stat("webhooks_sent")
+        response = requests.post(webhook_url, json=payload, timeout=5)
+        if response.status_code in [200, 201]:
+            app.logger.info("[Webhook] Data sent to Make.com successfully.")
             return True
+        app.logger.error(f"[Webhook Error] {response.text}")
         return False
     except Exception as e:
-        app.logger.error(f"[Webhook] Exception: {e}")
+        app.logger.error(f"[Webhook Exception] {e}")
         return False
 
 
-# ═══════════════════════════════════════════════════════════════════
-# ESCALATION LADDER
-# ═══════════════════════════════════════════════════════════════════
-def escalation_timer(alert_id: str, message: str):
-    """Cancellable escalation. If caregiver acknowledges before timer
-    expires, the WhatsApp message is silently aborted."""
-    app.logger.info(f"[{alert_id}] Escalation timer armed ({ESCALATION_DELAY}s)")
-    time.sleep(ESCALATION_DELAY)
+# ═══════════════════════════════════════════════════════════════
+# ESCALATION MATRIX  (Thing 2)
+# ─────────────────────────────────────────────────────────────
+#  t = 0s     → Bluetooth speaker alert sound
+#  t = 120s   → WhatsApp to family   (if not RESOLVED)
+#  t = 300s   → Twilio voice call    (if not RESOLVED)
+# ═══════════════════════════════════════════════════════════════
+def escalation_ladder(alert_id, message, gesture):
+    app.logger.info(f"[{alert_id}] Ladder started (whatsapp@{WHATSAPP_AFTER_SEC}s, voice@{VOICE_AFTER_SEC}s)")
+
+    # STEP 1 — Bluetooth speaker alert (t=0)
+    push_speaker_command({
+        "action":   "play_alert",
+        "alert_id": alert_id,
+        "gesture":  gesture,
+        "message":  message,
+    })
+    push_feed({
+        "time":    datetime.utcnow().strftime("%H:%M:%S"),
+        "type":    "Bluetooth Speaker",
+        "message": f"Alert sound sent to caregiver speaker ({gesture})."
+    })
+
+    start = time.time()
+
+    # STEP 2 — wait until 2 min → WhatsApp
+    while time.time() - start < WHATSAPP_AFTER_SEC:
+        time.sleep(2)
+        with alerts_lock:
+            alert = alerts.get(alert_id)
+            if not alert or alert["status"] == "RESOLVED":
+                app.logger.info(f"[{alert_id}] RESOLVED before WhatsApp — ladder stopped.")
+                push_feed({
+                    "time":    datetime.utcnow().strftime("%H:%M:%S"),
+                    "type":    "Dashboard",
+                    "message": f"Caregiver came. Ladder stopped for {alert_id}."
+                })
+                return
 
     with alerts_lock:
         alert = alerts.get(alert_id)
-        if not alert:
-            return
-        if alert["status"] == "RESOLVED":
-            app.logger.info(f"[{alert_id}] Acknowledged → WhatsApp aborted ✅")
-            push_feed({
-                "type": "Dashboard",
-                "message": f"Caregiver acknowledged {alert_id}. WhatsApp aborted.",
-                "severity": "success",
-            })
-            return
-        app.logger.info(f"[{alert_id}] Not acknowledged → escalating 🚨")
-        alert["status"] = "ESCALATED"
-        ok = tool_send_whatsapp(message)
-        push_feed({
-            "type": "Meta WhatsApp",
-            "message": f"{alert_id} escalated to WhatsApp." if ok else f"{alert_id} WhatsApp FAILED.",
-            "severity": "danger" if ok else "warning",
-        })
-        if ok:
-            bump_stat("escalated")
+        if alert:
+            alert["status"] = "WHATSAPP_SENT"
+
+    tool_send_whatsapp(message)
+    push_feed({
+        "time":    datetime.utcnow().strftime("%H:%M:%S"),
+        "type":    "Meta WhatsApp",
+        "message": "2 min passed. WhatsApp sent to family."
+    })
+
+    # STEP 3 — wait until 5 min → Voice call
+    while time.time() - start < VOICE_AFTER_SEC:
+        time.sleep(2)
+        with alerts_lock:
+            alert = alerts.get(alert_id)
+            if not alert or alert["status"] == "RESOLVED":
+                app.logger.info(f"[{alert_id}] RESOLVED before voice call — ladder stopped.")
+                push_feed({
+                    "time":    datetime.utcnow().strftime("%H:%M:%S"),
+                    "type":    "Dashboard",
+                    "message": f"Caregiver came. Voice call cancelled for {alert_id}."
+                })
+                return
+
+    with alerts_lock:
+        alert = alerts.get(alert_id)
+        if alert:
+            alert["status"] = "VOICE_CALLED"
+
+    tool_send_voice_call(f"Emergency gesture: {gesture}. {message}")
+    push_feed({
+        "time":    datetime.utcnow().strftime("%H:%M:%S"),
+        "type":    "Twilio Voice",
+        "message": "5 min passed. Voice call dispatched to family."
+    })
 
 
-# ═══════════════════════════════════════════════════════════════════
-# GESTURE → PLAN (HARD RULE ENGINE)
-# ═══════════════════════════════════════════════════════════════════
-def build_plan(gesture: str) -> dict:
-    if gesture == "FIST":
-        return {"whatsapp": True, "voice": True, "music": True,
-                "spoken": "EMERGENCY_DISPATCHED", "severity": "critical",
-                "label": "Emergency — Fall / Distress"}
-    if gesture == "WATER":
-        return {"whatsapp": True, "voice": False, "music": False,
-                "spoken": "CONFIRM_WATER", "severity": "info", "label": "Water Requested"}
-    if gesture == "FOOD":
-        return {"whatsapp": True, "voice": False, "music": False,
-                "spoken": "CONFIRM_FOOD", "severity": "info", "label": "Food Requested"}
-    if gesture == "TOILET":
-        return {"whatsapp": True, "voice": False, "music": False,
-                "spoken": "CONFIRM_TOILET", "severity": "info", "label": "Toilet Assistance"}
-    return {"whatsapp": False, "voice": False, "music": False,
-            "spoken": "NONE", "severity": "safe", "label": "Routine Check"}
-
-
-# ═══════════════════════════════════════════════════════════════════
-# ROUTES
-# ═══════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+# VIEWS & ROUTES
+# ═══════════════════════════════════════════════════════════════
 @app.route("/", methods=["GET", "POST"])
 def patient_view():
     return render_template("patient.html")
@@ -283,219 +266,172 @@ def uploaded_file(filename):
     return send_from_directory(UPLOAD_DIR, filename)
 
 
-@app.route("/health", methods=["GET", "POST"])
-def health():
-    return jsonify({"status": "ok", "time": datetime.utcnow().isoformat()})
+@app.route("/api/v1/process-frame", methods=["GET", "POST"])
+def process_frame():
+    data          = request.get_json(force=True, silent=True) or {}
+    snapshot_b64  = data.get("snapshot")
+    gesture_input = data.get("gesture", "NONE").upper()
 
+    if not snapshot_b64:
+        return jsonify({"error": "snapshot missing"}), 400
 
-@app.route("/api/v1/debug", methods=["GET", "POST"])
-def debug_env():
-    return jsonify({
-        "gemini": bool(GEMINI_API_KEY),
-        "gemini_model": GEMINI_MODEL,
-        "meta_whatsapp": {
-            "token": bool(os.getenv("META_WHATSAPP_TOKEN")),
-            "phone_id": bool(os.getenv("META_PHONE_NUMBER_ID")),
-            "to": bool(os.getenv("FAMILY_WHATSAPP_TO")),
+    alert_id = f"ALT-{int(time.time())}"
+    fname    = f"{alert_id}.jpg"
+    fpath    = UPLOAD_DIR / fname
+
+    try:
+        raw_b64     = snapshot_b64.split(",")[1] if "," in snapshot_b64 else snapshot_b64
+        image_bytes = base64.b64decode(raw_b64)
+        Image.open(io.BytesIO(image_bytes)).convert("RGB").save(fpath, "JPEG", quality=80)
+    except Exception as e:
+        app.logger.error(f"Image save failed: {e}")
+        return jsonify({"error": f"Image decode failed: {e}"}), 400
+
+    # ═══════════════════════════════════════════════════════════
+    # GEMINI PROMPT — SHORT (Thing 1: faster processing)
+    # ═══════════════════════════════════════════════════════════
+    prompt = (
+        f"Care agent. Gesture: '{gesture_input}'. Look at image.\n"
+        f"FIST or fall → voice_call+whatsapp+music.\n"
+        f"WATER/FOOD/TOILET → whatsapp only.\n"
+        f"NONE & safe → nothing.\n"
+        f"If patient looks unwell, slumped, or in distress → treat as FIST.\n"
+        f"JSON only:\n"
+        "{\n"
+        '  "assessment": "<short>",\n'
+        '  "tools_to_execute": {\n'
+        '    "whatsapp_alert": {"execute": bool, "message": "<text>"},\n'
+        '    "voice_call": {"execute": bool, "reason": "<text>"},\n'
+        '    "comfort_music": {"execute": bool}\n'
+        '  },\n'
+        '  "spoken_code": "CONFIRM_WATER"|"CONFIRM_FOOD"|"CONFIRM_TOILET"|"EMERGENCY_DISPATCHED"|"NONE"\n'
+        "}"
+    )
+
+    plan = {
+        "assessment": f"Fallback. Gesture: {gesture_input}",
+        "tools_to_execute": {
+            "whatsapp_alert": {"execute": (gesture_input != "NONE"), "message": f"{gesture_input} requested."},
+            "voice_call":     {"execute": (gesture_input == "FIST"), "reason": "Emergency gesture."},
+            "comfort_music":  {"execute": (gesture_input == "FIST")}
         },
-        "twilio": {
-            "sid": bool(TWILIO_SID), "token": bool(TWILIO_TOKEN),
-            "from": bool(os.getenv("TWILIO_VOICE_FROM")),
-            "to": bool(os.getenv("FAMILY_PHONE_TO")),
-        },
-        "jamendo": bool(os.getenv("JAMENDO_CLIENT_ID")),
-        "make_webhook": bool(os.getenv("MAKE_WEBHOOK_URL")),
-        "escalation_delay_seconds": ESCALATION_DELAY,
-    })
+        "spoken_code": "EMERGENCY_DISPATCHED" if gesture_input == "FIST" else "NONE"
+    }
 
+    # ═══════════════════════════════════════════════════════════
+    # GEMINI CALL — TIMED + CAPPED (Thing 1: 8-second target)
+    # ═══════════════════════════════════════════════════════════
+    if ai_client:
+        try:
+            t0 = time.time()
+            app.logger.info(f"[{alert_id}] Gemini call started...")
+            response = ai_client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=[types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"), prompt],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1,
+                    max_output_tokens=180,   # cap output → faster
+                ),
+            )
+            elapsed = time.time() - t0
+            app.logger.info(f"[{alert_id}] Gemini responded in {elapsed:.1f}s")
+            plan = json.loads(response.text.strip())
+            app.logger.info(f"[{alert_id}] Agent Plan: {plan}")
+        except Exception as e:
+            app.logger.error(f"[Gemini Error] {e}")
 
-@app.route("/api/v1/state", methods=["GET", "POST"])
-def get_state():
+    tools        = plan.get("tools_to_execute", {})
+    is_emergency = tools.get("voice_call", {}).get("execute", False)
+    needs_alert  = tools.get("whatsapp_alert", {}).get("execute", False) or is_emergency
+    status       = "PENDING" if needs_alert else "RESOLVED"
+
     with alerts_lock:
-        all_alerts = list(alerts.values())
-    with feed_lock:
-        feed = list(events_feed)[:50]
-    with stats_lock:
-        s = dict(stats)
+        alerts[alert_id] = {
+            "alert_id":   alert_id,
+            "created_at": datetime.utcnow().isoformat(),
+            "gesture":    gesture_input,
+            "status":     status,
+            "assessment": plan.get("assessment", ""),
+            "image":      f"/uploads/{fname}"
+        }
 
-    active = [a for a in all_alerts if a["status"] != "RESOLVED"]
-    recent = sorted(all_alerts, key=lambda x: x["created_at"], reverse=True)[:12]
+    # ─── Execute Tools ───
+    if needs_alert:
+        push_feed({
+            "time":    datetime.utcnow().strftime("%H:%M:%S"),
+            "type":    "Dashboard",
+            "message": "Pop-up triggered. Awaiting caregiver..."
+        })
+        threading.Thread(
+            target=escalation_ladder,
+            args=(
+                alert_id,
+                tools.get("whatsapp_alert", {}).get("message", "Patient needs attention."),
+                gesture_input
+            ),
+            daemon=True
+        ).start()
+
+    music_url = tool_get_jamendo_music() if tools.get("comfort_music", {}).get("execute", False) else None
+    if music_url:
+        push_feed({
+            "time":    datetime.utcnow().strftime("%H:%M:%S"),
+            "type":    "Jamendo API",
+            "message": "Comfort Music Deployed."
+        })
+
+    if gesture_input != "NONE":
+        tool_send_to_webhook(alert_id, gesture_input, plan.get("assessment", ""), raw_b64)
+        push_feed({
+            "time":    datetime.utcnow().strftime("%H:%M:%S"),
+            "type":    "Make.com",
+            "message": "Backed up to G-Drive."
+        })
+
+    if status == "RESOLVED":
+        push_feed({
+            "time":    datetime.utcnow().strftime("%H:%M:%S"),
+            "type":    "WATCHDOG",
+            "message": "Routine check safe."
+        })
 
     return jsonify({
-        "active_alerts": active,
-        "recent_images": recent,
-        "feed": feed,
-        "stats": s,
-        "server_time": datetime.utcnow().strftime("%H:%M:%S"),
+        "alert_id":       alert_id,
+        "assessment":     plan.get("assessment"),
+        "spoken_code":    plan.get("spoken_code", "NONE"),
+        "play_music_url": music_url
     })
 
 
 @app.route("/api/v1/acknowledge", methods=["GET", "POST"])
 def acknowledge_alert():
-    data = request.get_json(force=True, silent=True) or request.args.to_dict() or {}
-    alert_id = data.get("alert_id")
+    data = request.get_json(force=True, silent=True) or {}
     with alerts_lock:
-        alert = alerts.get(alert_id)
+        alert = alerts.get(data.get("alert_id"))
         if alert:
             alert["status"] = "RESOLVED"
-            alert["resolved_at"] = datetime.utcnow().isoformat()
-            app.logger.info(f"[{alert_id}] Acknowledged by caregiver")
-            bump_stat("acknowledged")
-    push_feed({
-        "type": "Dashboard",
-        "message": f"Caregiver acknowledged {alert_id}.",
-        "severity": "success",
-    })
-    return jsonify({"status": "SUCCESS", "alert_id": alert_id})
+            app.logger.info(f"Alert {data.get('alert_id')} marked RESOLVED.")
+    return jsonify({"status": "SUCCESS"})
 
 
-@app.route("/api/v1/process-frame", methods=["GET", "POST"])
-def process_frame():
-    bump_stat("total_frames")
-    data = request.get_json(force=True, silent=True) or {}
-    snapshot_b64 = data.get("snapshot")
-    gesture = (data.get("gesture") or "NONE").upper()
+@app.route("/api/v1/speaker", methods=["GET", "POST"])
+def speaker_commands():
+    with speaker_lock:
+        cmds = list(speaker_queue)
+        speaker_queue.clear()
+    return jsonify({"commands": cmds})
 
-    if not snapshot_b64:
-        return jsonify({"error": "snapshot missing"}), 400
 
-    alert_id = f"ALT-{int(time.time() * 1000) % 10_000_000}"
-    fname = f"{alert_id}.jpg"
-    fpath = UPLOAD_DIR / fname
-
-    # Decode image
-    try:
-        raw_b64 = snapshot_b64.split(",", 1)[1] if "," in snapshot_b64 else snapshot_b64
-        image_bytes = base64.b64decode(raw_b64)
-        Image.open(io.BytesIO(image_bytes)).convert("RGB").save(fpath, "JPEG", quality=80)
-    except Exception as e:
-        app.logger.error(f"[{alert_id}] Image decode failed: {e}")
-        return jsonify({"error": f"image decode failed: {e}"}), 400
-
-    app.logger.info(f"[{alert_id}] gesture={gesture}")
-
-    plan = build_plan(gesture)
-    assessment = f"Gesture detected: {gesture}"
-
-    # Gemini Vision refinement
-    if ai_client:
-        prompt = (
-            "You are a vision assistant for an elderly-care monitoring system.\n"
-            f"The patient triggered gesture: '{gesture}'. This is GROUND TRUTH.\n"
-            "Look at the image and describe:\n"
-            "1. What the person is doing (posture, activity, environment)\n"
-            "2. Whether you see an OBVIOUS additional emergency "
-            "(visible fall, person on floor, blood, unconsciousness, fire)\n\n"
-            "Return ONLY valid JSON:\n"
-            '{"assessment": "<one concise sentence>", "visible_emergency": true|false}'
-        )
-        try:
-            resp = ai_client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=[
-                    types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                    prompt,
-                ],
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.1,
-                ),
-            )
-            parsed = json.loads(resp.text.strip())
-            assessment = parsed.get("assessment", assessment)
-            vision_emergency = bool(parsed.get("visible_emergency", False))
-            if vision_emergency and not plan["voice"]:
-                app.logger.info(f"[{alert_id}] 🔥 Vision emergency — upgrading")
-                plan = build_plan("FIST")
-                assessment = f"VISION EMERGENCY — {assessment}"
-            app.logger.info(f"[{alert_id}] Gemini OK: {assessment[:80]}")
-        except Exception as e:
-            app.logger.error(f"[{alert_id}] Gemini error: {e}")
-
-    if plan["voice"]:
-        status = "ESCALATED"
-    elif plan["whatsapp"]:
-        status = "PENDING"
-    else:
-        status = "RESOLVED"
-
+@app.route("/api/v1/state", methods=["GET", "POST"])
+def get_state():
     with alerts_lock:
-        alerts[alert_id] = {
-            "alert_id": alert_id,
-            "created_at": datetime.utcnow().isoformat(),
-            "gesture": gesture,
-            "label": plan["label"],
-            "severity": plan["severity"],
-            "status": status,
-            "assessment": assessment,
-            "image": f"/uploads/{fname}",
-        }
-    if gesture != "NONE":
-        bump_stat("total_alerts")
-
-    # ─── EXECUTE TOOLS ───
-
-    if plan["whatsapp"]:
-        push_feed({
-            "type": "Dashboard",
-            "message": f"{alert_id}: {plan['label']} — pop-up awaiting caregiver...",
-            "severity": "warning",
-        })
-        threading.Thread(
-            target=escalation_timer,
-            args=(alert_id, f"Patient triggered '{gesture}'. {assessment}"),
-            daemon=True,
-            name=f"escalate-{alert_id}",
-        ).start()
-
-    if plan["voice"]:
-        ok = tool_send_voice_call(f"Emergency gesture: {gesture}. {assessment}")
-        push_feed({
-            "type": "Twilio Voice",
-            "message": "Voice call dispatched to family." if ok else "Voice call FAILED.",
-            "severity": "danger" if ok else "warning",
-        })
-
-    music_url = None
-    if plan["music"]:
-        music_url = tool_get_jamendo_music()
-        if music_url:
-            push_feed({
-                "type": "Jamendo API",
-                "message": "Comfort music deployed to patient.",
-                "severity": "info",
-            })
-
-    if gesture != "NONE":
-        ok = tool_send_to_webhook(alert_id, gesture, assessment, raw_b64)
-        push_feed({
-            "type": "Make.com",
-            "message": "Backed up to Google Drive." if ok else "Webhook FAILED — check MAKE_WEBHOOK_URL.",
-            "severity": "success" if ok else "warning",
-        })
-
-    if status == "RESOLVED":
-        push_feed({"type": "WATCHDOG", "message": f"Routine check safe ({gesture}).", "severity": "safe"})
-
-    return jsonify({
-        "alert_id": alert_id,
-        "assessment": assessment,
-        "spoken_code": plan["spoken"],
-        "play_music_url": music_url,
-        "severity": plan["severity"],
-        "status": status,
-    })
+        active = [a for a in alerts.values() if a["status"] != "RESOLVED"]
+        recent = sorted(alerts.values(), key=lambda x: x["created_at"], reverse=True)[:10]
+    with feed_lock:
+        feed = events_feed[:20]
+    return jsonify({"active_alerts": active, "recent_images": recent, "feed": feed})
 
 
-# ═══════════════════════════════════════════════════════════════════
-# MAIN
-# ═══════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    app.logger.info("=" * 60)
-    app.logger.info("🛡  Guardian Angel — Care Agent starting")
-    app.logger.info(f"   Gemini model: {GEMINI_MODEL}")
-    app.logger.info(f"   Gemini: {'✅' if ai_client else '❌'}")
-    app.logger.info(f"   Twilio: {'✅' if twilio_client else '❌'}")
-    app.logger.info(f"   Escalation delay: {ESCALATION_DELAY}s")
-    app.logger.info("=" * 60)
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False, threaded=True)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=False, threaded=True)
