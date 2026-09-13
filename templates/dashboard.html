@@ -39,7 +39,6 @@
       const res = await fetch('/api/v1/state');
       const data = await res.json();
       
-      // Alerts
       if(data.active_alerts.length === 0) document.getElementById('alerts').innerHTML = "All clear.";
       else {
         document.getElementById('alerts').innerHTML = data.active_alerts.map(a => `
@@ -50,10 +49,7 @@
         `).join('');
       }
 
-      // Images
       document.getElementById('gallery').innerHTML = data.recent_images.map(img => `<img src="${img.image}">`).join('');
-
-      // Logs
       document.getElementById('log').innerHTML = data.feed.map(f => `[${f.time}] <b>${f.type}</b>: ${f.message}<br>`).join('');
     }
 
