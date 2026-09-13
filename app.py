@@ -21,11 +21,9 @@ load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET", "care-agent-v1")
-
-# Docker / Gunicorn Production Fixes
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
-# Wire Flask logs to Gunicorn's logger so you can actually see them in the terminal
+# Gunicorn Logging Wiring
 gunicorn_logger = logging.getLogger('gunicorn.error')
 if gunicorn_logger.handlers:
     app.logger.handlers = gunicorn_logger.handlers
@@ -36,6 +34,7 @@ else:
 UPLOAD_DIR = Path("static/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+# Configs
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID")
@@ -54,6 +53,7 @@ def push_feed(entry):
         events_feed.insert(0, entry)
         del events_feed[100:]
 
+# --- TOOL 1: META WHATSAPP ---
 def tool_send_whatsapp(message):
     token = os.getenv("META_WHATSAPP_TOKEN")
     phone_id = os.getenv("META_PHONE_NUMBER_ID")
@@ -80,13 +80,13 @@ def tool_send_whatsapp(message):
         if response.status_code in [200, 201]:
             app.logger.info("[WhatsApp] Sent successfully via Meta Graph API.")
             return True
-        else:
-            app.logger.error(f"[WhatsApp] Failed: {response.text}")
-            return False
+        app.logger.error(f"[WhatsApp Error] {response.text}")
+        return False
     except Exception as e:
-        app.logger.error(f"[WhatsApp] Exception: {e}")
+        app.logger.error(f"[WhatsApp Exception] {e}")
         return False
 
+# --- TOOL 2: TWILIO VOICE ---
 def tool_send_voice_call(reason):
     if not twilio_client: 
         app.logger.warning("[Voice] Missing Twilio credentials.")
@@ -104,6 +104,28 @@ def tool_send_voice_call(reason):
         app.logger.error(f"[Voice Error] {e}")
         return False
 
+# --- TOOL 3: JAMENDO MUSIC API ---
+def tool_get_jamendo_music():
+    client_id = os.getenv("JAMENDO_CLIENT_ID")
+    if not client_id:
+        app.logger.warning("[Jamendo] No Client ID provided. Using fallback track.")
+        return "https://prod-1.storage.jamendo.com/?trackid=1890757&format=mp31"
+        
+    try:
+        url = f"https://api.jamendo.com/v3.0/tracks/?client_id={client_id}&format=json&tags=ambient,relaxing&limit=1"
+        response = requests.get(url, timeout=5)
+        data = response.json()
+        
+        if data.get("results") and len(data["results"]) > 0:
+            app.logger.info("[Jamendo] Live track retrieved via API.")
+            return data["results"][0]["audio"]
+            
+        return "https://prod-1.storage.jamendo.com/?trackid=1890757&format=mp31"
+    except Exception as e:
+        app.logger.error(f"[Jamendo Error] {e}")
+        return "https://prod-1.storage.jamendo.com/?trackid=1890757&format=mp31"
+
+# --- VIEWS & ROUTES ---
 @app.route("/", methods=["GET", "POST"])
 def patient_view():
     return render_template("patient.html")
@@ -194,6 +216,7 @@ def process_frame():
             "image": f"/uploads/{fname}"
         }
     
+    # Tool Executions
     if tools.get("whatsapp_alert", {}).get("execute", False):
         tool_send_whatsapp(tools["whatsapp_alert"].get("message", "Patient needs attention."))
         push_feed({"time": datetime.utcnow().strftime("%H:%M:%S"), "type": "Meta WhatsApp", "message": "Alert Dispatched."})
@@ -202,7 +225,7 @@ def process_frame():
         tool_send_voice_call(tools["voice_call"].get("reason", "Critical alert."))
         push_feed({"time": datetime.utcnow().strftime("%H:%M:%S"), "type": "Twilio Voice", "message": "Escalation Dialed."})
 
-    music_url = "https://prod-1.storage.jamendo.com/?trackid=1890757&format=mp31" if tools.get("comfort_music", {}).get("execute", False) else None
+    music_url = tool_get_jamendo_music() if tools.get("comfort_music", {}).get("execute", False) else None
     if music_url:
         push_feed({"time": datetime.utcnow().strftime("%H:%M:%S"), "type": "Jamendo API", "message": "Comfort Music Deployed."})
 
@@ -223,7 +246,7 @@ def acknowledge_alert():
         alert = alerts.get(data.get("alert_id"))
         if alert: 
             alert["status"] = "RESOLVED"
-            app.logger.info(f"Alert {data.get('alert_id')} marked as RESOLVED by caregiver.")
+            app.logger.info(f"Alert {data.get('alert_id')} marked RESOLVED.")
     return jsonify({"status": "SUCCESS"})
 
 @app.route("/api/v1/state", methods=["GET", "POST"])
@@ -236,5 +259,4 @@ def get_state():
     return jsonify({"active_alerts": active, "recent_images": recent, "feed": feed})
 
 if __name__ == "__main__":
-    # Standard run for local dev, Gunicorn bypasses this block completely.
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=False, threaded=True)
