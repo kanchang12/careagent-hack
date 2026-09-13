@@ -46,7 +46,6 @@
     let activeStream = null;
     let activeCamera = null;
     let speakerLoop = null;
-    let lockUntil = 0;
 
     const VOCAB = {
       "CONFIRM_WATER": "Noted. Your family has been alerted for water.",
@@ -76,10 +75,7 @@
           activeStream = stream;
           video.srcObject = stream;
           initMediaPipe();
-          // 8s watchdog
-          watchdogInterval = setInterval(() => {
-            if (!isLocked && Date.now() > lockUntil) dispatchEvent("NONE");
-          }, 8000);
+          watchdogInterval = setInterval(() => { if (!isLocked) dispatchEvent("NONE"); }, 8000);
         }).catch(e => log("Camera Error: " + e.message));
     }
 
@@ -93,14 +89,12 @@
       comfortAudio.currentTime = 0;
       window.speechSynthesis.cancel();
       isLocked = false;
-      lockUntil = 0;
       document.getElementById('startBtn').style.display = "inline-block";
       document.getElementById('stopBtn').style.display = "none";
       setStatus("");
-      log("🛑 Agent sequence stopped.");
+      log("🛑 Agent stopped.");
     }
 
-    // --- 20-second repeating speaker loop with startup grace ---
     function startSpeakerLoop() {
       if (speakerLoop) return;
       log("🔊 Speaker loop active (every 20s).");
@@ -113,24 +107,18 @@
         try {
           const r = await fetch("/api/v1/patient-loop");
           const d = await r.json();
-
           if (d.speak) {
             missCount = 0;
             speak(d.phrase);
             log(`🔊 "${d.phrase}" (${d.remaining}s left)`);
             return;
           }
-
-          // Ignore speak:false during the first 5s (server-side race guard)
           if (Date.now() - startedAt < 5000) return;
-
-          // Require two consecutive misses before killing the loop
           missCount++;
           if (missCount >= 2) {
             log("✅ Caregiver acknowledged. Loop stopped.");
             setStatus("");
             if (speakerLoop) { clearInterval(speakerLoop); speakerLoop = null; }
-            lockUntil = 0;
           }
         } catch (e) { /* ignore */ }
       };
@@ -141,7 +129,6 @@
 
     async function dispatchEvent(gestureName) {
       if (!video.videoWidth) return;
-      if (Date.now() < lockUntil) { log("⏸ Locked — ignoring frame."); return; }
       canvas.width = 480; canvas.height = 360;
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       const b64 = canvas.toDataURL("image/jpeg", 0.7);
@@ -153,14 +140,18 @@
         });
         const data = await res.json();
 
-        if (data.locked) { log("⏸ Server locked — alert in progress."); return; }
+        if (data.locked) {
+          log(`⏸ Server locked — ${data.remaining}s left.`);
+          setStatus(`⏸ Paused — ${data.remaining}s`);
+          return;
+        }
 
-        log(`Agent Assessed: ${data.assessment}`);
+        log(`Agent: ${data.assessment}`);
 
         if (data.play_music_url) {
           comfortAudio.src = data.play_music_url;
           comfortAudio.play().catch(e => console.log("Audio block", e));
-          log("🎵 Comfort Music Deployed.");
+          log("🎵 Comfort Music.");
         } else {
           comfortAudio.pause();
         }
@@ -168,53 +159,59 @@
         if (VOCAB[data.spoken_code]) speak(VOCAB[data.spoken_code]);
 
         if (data.alert_id && data.spoken_code && data.spoken_code !== "NONE") {
-          lockUntil = Date.now() + 120000;
           startSpeakerLoop();
         }
       } catch (err) { log("API Error"); }
     }
 
+    // ===================== ORIGINAL WORKING MEDIAPIPE =====================
     function initMediaPipe() {
       const hands = new Hands({
-        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`
+        locateFile: (file) => {
+          return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`;
+        }
       });
+
       hands.setOptions({ maxNumHands: 1, minDetectionConfidence: 0.5 });
 
-      let stable = null, count = 0;
+      let stable = null;
+      let count = 0;
 
       hands.onResults((results) => {
-        if (Date.now() < lockUntil) { count = 0; return; }
-        if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) { count = 0; return; }
+        if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+          count = 0;
+          return;
+        }
 
         const lm = results.multiHandLandmarks[0];
         let fingers = 0;
-        if (lm[8].y  < lm[6].y)  fingers++;
+
+        if (lm[8].y < lm[6].y) fingers++;
         if (lm[12].y < lm[10].y) fingers++;
         if (lm[16].y < lm[14].y) fingers++;
         if (lm[20].y < lm[18].y) fingers++;
 
-        const gesture = (fingers === 0) ? "FIST"
-                      : (fingers === 1) ? "WATER"
-                      : (fingers === 2) ? "FOOD"
-                      : (fingers === 3) ? "TOILET"
-                      : "NONE";
+        let gesture = (fingers === 0) ? "FIST" : (fingers <= 3 ? (fingers === 1 ? "WATER" : (fingers === 2 ? "FOOD" : "TOILET")) : "NONE");
 
         if (gesture !== "NONE") {
-          if (stable === gesture) count++;
-          else { stable = gesture; count = 1; }
+          if (stable === gesture) {
+            count++;
+          } else {
+            stable = gesture;
+            count = 1;
+          }
           if (count === 5 && !isLocked) {
             isLocked = true;
             log(`🎯 Trigger: ${gesture}`);
             dispatchEvent(gesture);
             setTimeout(() => { isLocked = false; count = 0; }, 5000);
           }
-        } else { count = 0; }
+        } else {
+          count = 0;
+        }
       });
 
-      activeCamera = new Camera(video, {
-        onFrame: async () => { await hands.send({ image: video }); },
-        width: 640, height: 480
-      });
+      activeCamera = new Camera(video, { onFrame: async () => { await hands.send({ image: video }); }, width: 640, height: 480 });
       activeCamera.start();
     }
   </script>
