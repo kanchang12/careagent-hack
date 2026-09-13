@@ -30,6 +30,7 @@
       transition: border-color 0.3s, box-shadow 0.3s;
     }
     .camera-box.live { border-color: #16a34a; box-shadow: 0 0 30px rgba(22,163,74,0.4); }
+    .camera-box.emergency { border-color: #dc2626; box-shadow: 0 0 40px rgba(220,38,38,0.7); }
     video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
 
     .gesture-hint { display: flex; justify-content: center; gap: 12px; flex-wrap: wrap; margin: 20px 0; }
@@ -38,6 +39,11 @@
       font-size: 0.85rem; border: 1px solid #334155;
     }
     .gesture-hint div.emergency { border-color: #dc2626; background: #450a0a; }
+    kbd {
+      background: #0f172a; border: 1px solid #475569; border-bottom-width: 2px;
+      border-radius: 4px; padding: 1px 6px; font-family: monospace;
+      font-size: 0.8em; color: #fbbf24;
+    }
 
     .btn {
       padding: 14px 28px; font-size: 1.05rem; font-weight: 700;
@@ -105,15 +111,15 @@
   <div><span class="status-badge idle" id="statusBadge">IDLE</span></div>
 
   <div class="gesture-hint">
-    <div>☝️ 1 finger → Water</div>
-    <div>✌️ 2 fingers → Food</div>
-    <div>🤟 3 fingers → Toilet</div>
-    <div class="emergency">✊ Fist → EMERGENCY</div>
+    <div>☝️ 1 finger <span style="color:#64748b">(or <kbd>1</kbd>)</span> → Water</div>
+    <div>✌️ 2 fingers <span style="color:#64748b">(or <kbd>2</kbd>)</span> → Food</div>
+    <div>🤟 3 fingers <span style="color:#64748b">(or <kbd>3</kbd>)</span> → Toilet</div>
+    <div class="emergency">✊ Fist <span style="color:#fca5a5">(or <kbd>F</kbd>)</span> → EMERGENCY</div>
   </div>
 
   <button class="btn" id="startBtn" onclick="initSystem()">▶ Initialize Guardian</button>
 
-  <div class="test-label">— Manual Demo Triggers —</div>
+  <div class="test-label">— Manual Demo Triggers (work instantly, no camera needed) —</div>
   <div>
     <button class="btn green" onclick="manualTrigger('WATER')">💧 Water</button>
     <button class="btn green" onclick="manualTrigger('FOOD')">🍽 Food</button>
@@ -121,7 +127,7 @@
     <button class="btn red" onclick="manualTrigger('FIST')">🚨 Emergency</button>
   </div>
 
-  <div id="log">[system] Awaiting initialization...</div>
+  <div id="log">[system] Ready. Click a button above or press 1 / 2 / 3 / F on your keyboard.</div>
   <div id="debugState"></div>
 
   <audio id="comfortAudio" loop playsinline></audio>
@@ -139,7 +145,8 @@
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
     let isLocked = false;
-    let lastAssessment = '';
+    let mediaPipeReady = false;
+    let audioUnlocked = false;
 
     const VOCAB = {
       "CONFIRM_WATER": "Noted. Your family has been alerted for water.",
@@ -158,22 +165,36 @@
       statusBadge.className = 'status-badge ' + state;
       statusBadge.textContent = state.toUpperCase();
       cameraBox.classList.toggle('live', state === 'live' || state === 'emergency');
+      cameraBox.classList.toggle('emergency', state === 'emergency');
     }
 
     function speak(phrase) {
       if (!window.speechSynthesis) return;
-      window.speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(phrase);
-      u.rate = 1.0; u.pitch = 1.0;
-      window.speechSynthesis.speak(u);
+      try {
+        window.speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(phrase);
+        u.rate = 1.0; u.pitch = 1.0;
+        window.speechSynthesis.speak(u);
+      } catch (e) { console.warn('speech failed', e); }
     }
 
-    function initSystem() {
-      // Unlock audio with silent WAV
+    // ── Unlock audio on first user gesture (needed for autoplay policies) ──
+    function unlockAudio() {
+      if (audioUnlocked) return;
+      audioUnlocked = true;
       comfortAudio.src = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
-      comfortAudio.play().catch(() => {});
+      comfortAudio.play().then(() => {
+        comfortAudio.pause();
+        comfortAudio.currentTime = 0;
+      }).catch(() => {});
+      try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {}
+    }
+    document.addEventListener('click', unlockAudio, { once: true });
+    document.addEventListener('keydown', unlockAudio, { once: true });
 
-      speak(" ");
+    // ── Initialize camera + MediaPipe ──
+    function initSystem() {
+      unlockAudio();
       document.getElementById('startBtn').disabled = true;
       log("Starting camera...");
       setStatus('idle');
@@ -184,113 +205,16 @@
           setStatus('live');
           log("Camera live ✅", 'success');
           initMediaPipe();
-          setInterval(() => { if (!isLocked) dispatchEvent("NONE", true); }, 10000);
+          // Watchdog — every 15s, only if camera is live
+          setInterval(() => {
+            if (!isLocked && video.videoWidth) dispatchEvent("NONE", true);
+          }, 15000);
         })
         .catch(e => {
-          log("Camera Error: " + e.message, 'danger');
+          log("Camera Error: " + e.message + " — you can still use the manual buttons.", 'danger');
           setStatus('idle');
           document.getElementById('startBtn').disabled = false;
         });
     }
 
-    function manualTrigger(gesture) {
-      log(`🧪 Manual trigger: ${gesture}`, 'highlight');
-      dispatchEvent(gesture, false);
-    }
-
-    async function dispatchEvent(gestureName, isWatchdog = false) {
-      if (!video.videoWidth) {
-        log("No video yet — click Initialize first.", 'danger');
-        return;
-      }
-      canvas.width = 480; canvas.height = 360;
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const b64 = canvas.toDataURL("image/jpeg", 0.7);
-
-      try {
-        const res = await fetch("/api/v1/process-frame", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ gesture: gestureName, snapshot: b64 })
-        });
-        const data = await res.json();
-
-        lastAssessment = data.assessment;
-        log(`🤖 ${data.assessment}`);
-
-        debugBox.textContent = `alert=${data.alert_id} status=${data.status} spoken=${data.spoken_code} music=${data.play_music_url ? 'YES' : 'no'}`;
-
-        if (data.play_music_url) {
-          comfortAudio.src = data.play_music_url;
-          comfortAudio.play()
-            .then(() => log("🎵 Comfort music playing", 'success'))
-            .catch(e => log("⚠ Audio blocked: " + e.message, 'danger'));
-        } else {
-          comfortAudio.pause();
-        }
-
-        if (data.status === 'ESCALATED' && data.severity === 'critical') {
-          setStatus('emergency');
-          setTimeout(() => setStatus('live'), 5000);
-        }
-
-        if (VOCAB[data.spoken_code]) speak(VOCAB[data.spoken_code]);
-      } catch (err) {
-        log("API Error: " + err.message, 'danger');
-      }
-    }
-
-    function initMediaPipe() {
-      const hands = new Hands({
-        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`
-      });
-      hands.setOptions({ maxNumHands: 1, minDetectionConfidence: 0.5 });
-
-      let stable = null, count = 0, lastLoggedGesture = null;
-
-      hands.onResults((results) => {
-        if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
-          count = 0;
-          return;
-        }
-        const lm = results.multiHandLandmarks[0];
-        let fingers = 0;
-        if (lm[8].y < lm[6].y) fingers++;
-        if (lm[12].y < lm[10].y) fingers++;
-        if (lm[16].y < lm[14].y) fingers++;
-        if (lm[20].y < lm[18].y) fingers++;
-
-        let gesture = (fingers === 0) ? "FIST"
-          : (fingers === 1) ? "WATER"
-          : (fingers === 2) ? "FOOD"
-          : (fingers === 3) ? "TOILET"
-          : "NONE";
-
-        if (gesture !== lastLoggedGesture) {
-          log(`👁 MediaPipe: ${fingers} fingers → ${gesture}`);
-          lastLoggedGesture = gesture;
-        }
-
-        if (gesture !== "NONE") {
-          if (stable === gesture) count++; else { stable = gesture; count = 1; }
-          if (count === 3 && !isLocked) {
-            isLocked = true;
-            log(`🎯 Trigger: ${gesture}`, 'highlight');
-            dispatchEvent(gesture, false);
-            setTimeout(() => { isLocked = false; count = 0; }, 5000);
-          }
-        } else {
-          count = 0;
-        }
-      });
-
-      const camera = new Camera(video, {
-        onFrame: async () => { await hands.send({ image: video }); },
-        width: 640, height: 480
-      });
-      camera.start();
-      log("MediaPipe hand detection armed ✅", 'success');
-    }
-  </script>
-</body>
-</html>
+    // ── Dispatch an event to
