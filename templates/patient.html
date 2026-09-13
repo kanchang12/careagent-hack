@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Care Agent — Patient Terminal</title>
+  <style>
+    body { background: #0f172a; color: #fff; font-family: sans-serif; text-align: center; margin: 0; padding: 20px; }
+    .camera-box { width: 100%; max-width: 480px; height: 360px; background: #000; border: 3px solid #334155; border-radius: 12px; margin: 0 auto 20px; position: relative; overflow: hidden; }
+    video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+    .btn { padding: 16px 24px; font-size: 1.2rem; font-weight: bold; background: #2563eb; color: #fff; border: none; border-radius: 8px; cursor: pointer; }
+    #log { font-family: monospace; color: #38bdf8; margin-top: 20px; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+
+  <h2>🛡️ Care Guardian Edge</h2>
+  
+  <div class="camera-box">
+    <video id="videoFeed" autoplay playsinline muted></video>
+  </div>
+  
+  <p>Gestures: 1=Water | 2=Food | 3=Toilet | Fist=EMERGENCY</p>
+  <button class="btn" id="startBtn" onclick="initSystem()">Initialize Agent</button>
+  <div id="log">Waiting to start...</div>
+
+  <audio id="comfortAudio" loop></audio>
+
+  <!-- MediaPipe -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+  <script>
+    const video = document.getElementById('videoFeed');
+    const logBox = document.getElementById('log');
+    const comfortAudio = document.getElementById('comfortAudio');
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    
+    let isLocked = false;
+    
+    const VOCAB = {
+      "CONFIRM_WATER": "Noted. Your family has been alerted for water.",
+      "CONFIRM_FOOD": "Noted. Your family has been alerted for food.",
+      "CONFIRM_TOILET": "Noted. Assistance for the toilet is requested.",
+      "EMERGENCY_DISPATCHED": "Emergency detected. I am calling your family right now.",
+      "COMFORT_WAITING": "Help is on the way. Just breathe."
+    };
+
+    function log(msg) { logBox.innerHTML = `[${new Date().toLocaleTimeString()}] ${msg}<br>` + logBox.innerHTML; }
+
+    function speak(phrase) {
+      if (!window.speechSynthesis) return;
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(new SpeechSynthesisUtterance(phrase));
+    }
+
+    function initSystem() {
+      speak(""); // Unlock audio
+      document.getElementById('startBtn').style.display = "none";
+      log("Starting camera...");
+
+      navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: "user" } })
+        .then(stream => {
+          video.srcObject = stream;
+          initMediaPipe();
+          setInterval(() => { if(!isLocked) dispatchEvent("NONE"); }, 40000); // 40s Watchdog
+        }).catch(e => log("Camera Error: " + e.message));
+    }
+
+    async function dispatchEvent(gestureName) {
+      if (!video.videoWidth) return;
+      canvas.width = 480; canvas.height = 360;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const b64 = canvas.toDataURL("image/jpeg", 0.7);
+
+      try {
+        const res = await fetch("/api/v1/process-frame", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ gesture: gestureName, snapshot: b64 })
+        });
+        const data = await res.json();
+        
+        log(`Agent Assessed: ${data.assessment}`);
+        
+        // App 3: Trigger Spotify/Jamendo Music Therapy
+        if (data.play_music_url) {
+            comfortAudio.src = data.play_music_url;
+            comfortAudio.play().catch(e => console.log("Audio block", e));
+            log("🎵 Comfort Music Deployed.");
+        } else {
+            comfortAudio.pause();
+        }
+
+        // Bounded TTS
+        if (VOCAB[data.spoken_code]) speak(VOCAB[data.spoken_code]);
+
+      } catch (err) { log("API Error"); }
+    }
+
+    function initMediaPipe() {
+      const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+      hands.setOptions({ maxNumHands: 1, minDetectionConfidence: 0.7 });
+      
+      let stable = null; let count = 0;
+      
+      hands.onResults((results) => {
+        if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) { count = 0; return; }
+        const lm = results.multiHandLandmarks[0];
+        
+        // Basic finger math
+        let fingers = 0;
+        if (lm[8].y < lm[6].y - 0.04) fingers++;
+        if (lm[12].y < lm[10].y - 0.04) fingers++;
+        if (lm[16].y < lm[14].y - 0.04) fingers++;
+        if (lm[20].y < lm[18].y - 0.04) fingers++;
+        
+        let gesture = (fingers === 0) ? "FIST" : (fingers <= 3 ? (fingers === 1 ? "WATER" : (fingers === 2 ? "FOOD" : "TOILET")) : "NONE");
+        
+        if (gesture !== "NONE") {
+          if (stable === gesture) count++; else { stable = gesture; count = 1; }
+          if (count === 25 && !isLocked) { // 1 sec hold
+            isLocked = true;
+            log(`🎯 Trigger: ${gesture}`);
+            dispatchEvent(gesture);
+            setTimeout(() => { isLocked = false; count=0; }, 5000); // 5s cooldown
+          }
+        }
+      });
+      
+      const camera = new Camera(video, { onFrame: async () => { await hands.send({ image: video }); }, width: 640, height: 480 });
+      camera.start();
+    }
+  </script>
+</body>
+</html>
