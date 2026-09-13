@@ -34,7 +34,6 @@ else:
 UPLOAD_DIR = Path("static/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-# ---------------- CONFIG ----------------
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 TWILIO_SID     = os.getenv("TWILIO_ACCOUNT_SID")
@@ -50,24 +49,17 @@ alerts_lock = threading.Lock()
 events_feed = []
 feed_lock = threading.Lock()
 
-# ---------------- TIMING ----------------
-ESCALATION_WINDOW_SEC  = 120     # speaker repeats for 2 min
-ESCALATION_CALL_AT     = 300     # non-emergency: call at 5 min if unresolved
-PROCESSING_LOCK_SEC    = 300     # lock new frames for 5 min after an event
+ESCALATION_WINDOW_SEC  = 120
+ESCALATION_CALL_AT     = 300
+PROCESSING_LOCK_SEC    = 300
 
-# ---------------- BOOT DIAGNOSTICS ----------------
 app.logger.info("=" * 60)
 app.logger.info("[BOOT] Care Agent starting")
 app.logger.info(f"[BOOT] GEMINI_MODEL        = {GEMINI_MODEL}")
-app.logger.info(f"[BOOT] GEMINI_API_KEY set  = {bool(GEMINI_API_KEY)}")
 app.logger.info(f"[BOOT] ai_client           = {'OK' if ai_client else 'MISSING'}")
 app.logger.info(f"[BOOT] twilio_client       = {'OK' if twilio_client else 'MISSING'}")
 app.logger.info(f"[BOOT] TWILIO_VOICE_FROM   = {TWILIO_FROM}")
 app.logger.info(f"[BOOT] FAMILY_PHONE_TO     = {FAMILY_PHONE}")
-app.logger.info(f"[BOOT] META token set      = {bool(os.getenv('META_WHATSAPP_TOKEN'))}")
-app.logger.info(f"[BOOT] META phone_id set   = {bool(os.getenv('META_PHONE_NUMBER_ID'))}")
-app.logger.info(f"[BOOT] JAMENDO_CLIENT_ID   = {bool(os.getenv('JAMENDO_CLIENT_ID'))}")
-app.logger.info(f"[BOOT] MAKE_WEBHOOK_URL    = {'set' if os.getenv('MAKE_WEBHOOK_URL') else 'MISSING'}")
 app.logger.info("=" * 60)
 
 
@@ -78,17 +70,13 @@ def push_feed(entry):
     app.logger.info(f"[FEED] {entry.get('type')}: {entry.get('message')}")
 
 
-# ---------------- TOOL 1: META WHATSAPP ----------------
 def tool_send_whatsapp(message):
-    app.logger.info("[WhatsApp] Attempting to send...")
     token = os.getenv("META_WHATSAPP_TOKEN")
     phone_id = os.getenv("META_PHONE_NUMBER_ID")
     to_number = os.getenv("FAMILY_WHATSAPP_TO")
-
     if not token or not phone_id:
-        app.logger.warning("[WhatsApp] Missing Meta API credentials.")
+        app.logger.warning("[WhatsApp] Missing credentials.")
         return False
-
     url = f"https://graph.facebook.com/v19.0/{phone_id}/messages"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {
@@ -99,34 +87,25 @@ def tool_send_whatsapp(message):
     }
     try:
         r = requests.post(url, headers=headers, json=payload, timeout=10)
-        app.logger.info(f"[WhatsApp] HTTP {r.status_code} :: {r.text[:200]}")
+        app.logger.info(f"[WhatsApp] HTTP {r.status_code}")
         return r.status_code in [200, 201]
     except Exception as e:
         app.logger.error(f"[WhatsApp Exception] {e}")
         return False
 
 
-# ---------------- TOOL 2: TWILIO VOICE ----------------
 def tool_send_voice_call(reason):
-    app.logger.info(f"[Voice] Attempting Twilio call. Reason: {reason}")
-    app.logger.info(f"[Voice] twilio_client={'OK' if twilio_client else 'MISSING'}")
-    app.logger.info(f"[Voice] FROM={TWILIO_FROM} TO={FAMILY_PHONE}")
-
+    app.logger.info(f"[Voice] Attempting call. Reason: {reason}")
     if not twilio_client:
         app.logger.warning("[Voice] Missing Twilio credentials.")
         return False
     if not TWILIO_FROM or not FAMILY_PHONE:
-        app.logger.warning("[Voice] Missing TWILIO_VOICE_FROM or FAMILY_PHONE_TO.")
+        app.logger.warning("[Voice] Missing FROM or TO.")
         return False
-
     try:
-        twiml = f"<Response><Say voice='alice'>Emergency Alert. Assessment: {reason}. Please check the dashboard immediately.</Say></Response>"
-        call = twilio_client.calls.create(
-            twiml=twiml,
-            to=FAMILY_PHONE,
-            from_=TWILIO_FROM
-        )
-        app.logger.info(f"[Voice] ✅ Twilio call dispatched. SID: {call.sid}")
+        twiml = f"<Response><Say voice='alice'>Emergency Alert. {reason}. Please check the dashboard immediately.</Say></Response>"
+        call = twilio_client.calls.create(twiml=twiml, to=FAMILY_PHONE, from_=TWILIO_FROM)
+        app.logger.info(f"[Voice] ✅ Call dispatched. SID: {call.sid}")
         return True
     except Exception as e:
         app.logger.error(f"[Voice Error] {type(e).__name__}: {e}")
@@ -134,27 +113,22 @@ def tool_send_voice_call(reason):
         return False
 
 
-# ---------------- TOOL 3: JAMENDO MUSIC ----------------
 def tool_get_jamendo_music():
     client_id = os.getenv("JAMENDO_CLIENT_ID")
     fallback = "https://prod-1.storage.jamendo.com/?trackid=1890757&format=mp31"
     if not client_id:
-        app.logger.warning("[Jamendo] No Client ID. Using fallback.")
         return fallback
     try:
         url = f"https://api.jamendo.com/v3.0/tracks/?client_id={client_id}&format=json&tags=ambient,relaxing&limit=1"
         r = requests.get(url, timeout=5)
         data = r.json()
         if data.get("results"):
-            app.logger.info("[Jamendo] Live track retrieved.")
             return data["results"][0]["audio"]
         return fallback
-    except Exception as e:
-        app.logger.error(f"[Jamendo Error] {e}")
+    except Exception:
         return fallback
 
 
-# ---------------- TOOL 4: MAKE.COM WEBHOOK ----------------
 def tool_send_to_webhook(alert_id, gesture, assessment, raw_b64):
     webhook_url = os.getenv("MAKE_WEBHOOK_URL")
     if not webhook_url:
@@ -170,33 +144,17 @@ def tool_send_to_webhook(alert_id, gesture, assessment, raw_b64):
     }
     try:
         r = requests.post(webhook_url, json=payload, timeout=10)
-        app.logger.info(f"[Webhook] HTTP {r.status_code} :: {r.text[:200]}")
+        app.logger.info(f"[Webhook] HTTP {r.status_code}")
         return r.status_code in [200, 201, 202]
     except Exception as e:
         app.logger.error(f"[Webhook Exception] {e}")
         return False
 
 
-# ---------------- ESCALATION TIMER ----------------
 def escalation_timer(alert_id, message, is_emergency):
-    """
-    Emergency:     call + whatsapp fired IMMEDIATELY (already done in process_frame).
-                   Timer just holds the speaker window and the processing lock.
-    Non-emergency: WhatsApp fired immediately.
-                   At 5 min, if still unresolved, place the Twilio call.
-    """
     start = time.time()
-    call_sent = is_emergency  # emergency already called it
-
-    app.logger.info(
-        f"[ESCALATION {alert_id}] Timer started. emergency={is_emergency}, "
-        f"Window={ESCALATION_WINDOW_SEC}s, CallAt={ESCALATION_CALL_AT}s"
-    )
-    push_feed({
-        "time": datetime.utcnow().strftime("%H:%M:%S"),
-        "type": "Bluetooth Speaker",
-        "message": "Repeat loop started (20s interval, 2 min window)."
-    })
+    call_sent = is_emergency
+    app.logger.info(f"[ESCALATION {alert_id}] started. emergency={is_emergency}")
 
     while True:
         time.sleep(1)
@@ -205,7 +163,6 @@ def escalation_timer(alert_id, message, is_emergency):
         with alerts_lock:
             alert = alerts.get(alert_id)
             if not alert:
-                app.logger.info(f"[ESCALATION {alert_id}] Alert gone. Exiting.")
                 return
             resolved = alert["status"] == "RESOLVED"
 
@@ -214,7 +171,7 @@ def escalation_timer(alert_id, message, is_emergency):
                 if alert_id in alerts:
                     alerts[alert_id]["processing_locked"] = False
                     alerts[alert_id]["lock_until_ts"] = 0
-            app.logger.info(f"[ESCALATION {alert_id}] Resolved by caregiver. Stopping.")
+            app.logger.info(f"[ESCALATION {alert_id}] Resolved. Stopping.")
             push_feed({
                 "time": datetime.utcnow().strftime("%H:%M:%S"),
                 "type": "Caregiver",
@@ -222,35 +179,30 @@ def escalation_timer(alert_id, message, is_emergency):
             })
             return
 
-        # Non-emergency: 5-minute rule
         if (not is_emergency) and (not call_sent) and elapsed >= ESCALATION_CALL_AT:
             call_sent = True
-            app.logger.info(f"[ESCALATION {alert_id}] 5 min unresolved → placing Twilio call")
+            app.logger.info(f"[ESCALATION {alert_id}] 5 min → placing call")
             ok = tool_send_voice_call(f"Unresolved request: {message}")
             push_feed({
                 "time": datetime.utcnow().strftime("%H:%M:%S"),
                 "type": "Twilio Voice",
                 "message": f"Voice call {'dispatched' if ok else 'FAILED'} at 5 min."
             })
-            # release lock after escalation complete
             with alerts_lock:
                 if alert_id in alerts:
                     alerts[alert_id]["processing_locked"] = False
                     alerts[alert_id]["lock_until_ts"] = 0
-            app.logger.info(f"[ESCALATION {alert_id}] 5 min elapsed. Lock released. Exiting.")
             return
 
-        # Emergency: nothing more to escalate, exit after the 5-min lock passes
-        if is_emergency and elapsed >= ESCALATION_CALL_AT:
+        if elapsed >= ESCALATION_CALL_AT:
             with alerts_lock:
                 if alert_id in alerts:
                     alerts[alert_id]["processing_locked"] = False
                     alerts[alert_id]["lock_until_ts"] = 0
-            app.logger.info(f"[ESCALATION {alert_id}] 5 min elapsed (emergency). Lock released. Exiting.")
+            app.logger.info(f"[ESCALATION {alert_id}] 5 min elapsed. Lock released.")
             return
 
 
-# ---------------- VIEWS ----------------
 @app.route("/", methods=["GET", "POST"])
 def patient_view():
     return render_template("patient.html")
@@ -264,7 +216,6 @@ def uploaded_file(filename):
     return send_from_directory(UPLOAD_DIR, filename)
 
 
-# ---------------- PATIENT SPEAKER LOOP ----------------
 @app.route("/api/v1/patient-loop", methods=["GET", "POST"])
 def patient_loop():
     now = time.time()
@@ -282,7 +233,6 @@ def patient_loop():
     return jsonify({"speak": False})
 
 
-# ---------------- MAIN FRAME PROCESSOR ----------------
 @app.route("/api/v1/process-frame", methods=["GET", "POST"])
 def process_frame():
     data = request.get_json(force=True, silent=True) or {}
@@ -294,7 +244,6 @@ def process_frame():
     if not snapshot_b64:
         return jsonify({"error": "snapshot missing"}), 400
 
-    # ---- STOP PROCESSING FOR 5 MIN AFTER AN EVENT ----
     now = time.time()
     with alerts_lock:
         for a in alerts.values():
@@ -303,7 +252,7 @@ def process_frame():
             lock_until = a.get("lock_until_ts", 0)
             if lock_until > now:
                 remaining = int(lock_until - now)
-                app.logger.info(f"[FRAME] BLOCKED — alert {a['alert_id']} active. {remaining}s left.")
+                app.logger.info(f"[FRAME] BLOCKED — {remaining}s left.")
                 return jsonify({
                     "alert_id": a["alert_id"],
                     "assessment": f"Processing paused. {remaining}s left.",
@@ -321,7 +270,6 @@ def process_frame():
         raw_b64 = snapshot_b64.split(",")[1] if "," in snapshot_b64 else snapshot_b64
         image_bytes = base64.b64decode(raw_b64)
         Image.open(io.BytesIO(image_bytes)).convert("RGB").save(fpath, "JPEG", quality=80)
-        app.logger.info(f"[FRAME] Image saved {fname}")
     except Exception as e:
         app.logger.error(f"[FRAME] Image save failed: {e}")
         return jsonify({"error": f"Image decode failed: {e}"}), 400
@@ -347,7 +295,7 @@ def process_frame():
     )
 
     plan = {
-        "assessment": f"Fallback mode. Gesture: {gesture_input}",
+        "assessment": f"Fallback. Gesture: {gesture_input}",
         "tools_to_execute": {
             "whatsapp_alert": {"execute": (gesture_input != "NONE"), "message": f"{gesture_input} requested."},
             "voice_call": {"execute": False, "reason": ""},
@@ -358,7 +306,7 @@ def process_frame():
 
     if ai_client:
         try:
-            app.logger.info(f"[{alert_id}] Requesting Gemini reasoning...")
+            app.logger.info(f"[{alert_id}] Requesting Gemini...")
             t0 = time.time()
             chat = ai_client.chats.create(
                 model=GEMINI_MODEL,
@@ -373,7 +321,7 @@ def process_frame():
                 [types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"), prompt]
             )
             raw_text = (response.text or "").strip()
-            app.logger.info(f"[{alert_id}] Gemini responded in {time.time()-t0:.1f}s, {len(raw_text)} chars")
+            app.logger.info(f"[{alert_id}] Gemini in {time.time()-t0:.1f}s")
 
             parsed = None
             try:
@@ -388,16 +336,15 @@ def process_frame():
                         pass
             if isinstance(parsed, dict) and parsed:
                 plan.update(parsed)
-                app.logger.info(f"[{alert_id}] Plan: {json.dumps(plan)[:300]}")
         except Exception as e:
             app.logger.error(f"[Gemini Error] {type(e).__name__}: {e}")
             app.logger.error(traceback.format_exc())
 
     if gesture_input == "FIST":
-        app.logger.info(f"[{alert_id}] FIST override applied.")
-        plan["assessment"] = "Emergency fist gesture received."
+        app.logger.info(f"[{alert_id}] FIST override.")
+        plan["assessment"] = "Emergency fist gesture."
         plan["tools_to_execute"] = {
-            "whatsapp_alert": {"execute": True, "message": "CRITICAL: Patient sent an emergency fist gesture."},
+            "whatsapp_alert": {"execute": True, "message": "CRITICAL: Emergency fist gesture."},
             "voice_call": {"execute": True, "reason": "Emergency fist gesture detected."},
             "comfort_music": {"execute": True}
         }
@@ -407,13 +354,7 @@ def process_frame():
     is_emergency = bool(tools.get("voice_call", {}).get("execute", False))
     wants_whatsapp = bool(tools.get("whatsapp_alert", {}).get("execute", False))
 
-    if is_emergency:
-        status = "ESCALATED"
-    elif wants_whatsapp:
-        status = "PENDING"
-    else:
-        status = "RESOLVED"
-
+    status = "ESCALATED" if is_emergency else ("PENDING" if wants_whatsapp else "RESOLVED")
     any_alert = is_emergency or wants_whatsapp
 
     with alerts_lock:
@@ -430,12 +371,9 @@ def process_frame():
             alerts[alert_id]["speak_phrase"] = "Emergency detected. Please stay calm. Help is coming."
             alerts[alert_id]["processing_locked"] = True
             alerts[alert_id]["lock_until_ts"] = time.time() + PROCESSING_LOCK_SEC
-            app.logger.info(f"[{alert_id}] EVENT RAISED — emergency={is_emergency} — processing locked for {PROCESSING_LOCK_SEC}s.")
+            app.logger.info(f"[{alert_id}] EVENT RAISED — emergency={is_emergency}")
 
-    # ---------- IMMEDIATE ACTIONS ----------
     if is_emergency:
-        # EMERGENCY → call + whatsapp RIGHT NOW
-        app.logger.info(f"[{alert_id}] EMERGENCY — dispatching call + WhatsApp immediately.")
         reason = tools.get("voice_call", {}).get("reason", "Critical alert.")
         ok_call = tool_send_voice_call(reason)
         push_feed({
@@ -452,8 +390,6 @@ def process_frame():
         })
 
     elif wants_whatsapp:
-        # NON-EMERGENCY → WhatsApp right now, call at 5 min if unresolved
-        app.logger.info(f"[{alert_id}] NON-EMERGENCY — sending WhatsApp now; call scheduled at 5 min.")
         msg = tools.get("whatsapp_alert", {}).get("message", "Patient needs attention.")
         ok_wa = tool_send_whatsapp(msg)
         push_feed({
@@ -462,12 +398,11 @@ def process_frame():
             "message": f"WhatsApp {'sent' if ok_wa else 'FAILED'} immediately."
         })
 
-    # ---------- START ESCALATION TIMER (holds lock + speaker window) ----------
     if any_alert:
         push_feed({
             "time": datetime.utcnow().strftime("%H:%M:%S"),
             "type": "Dashboard",
-            "message": "Alert raised. Speaker loop + escalation timer started."
+            "message": "Alert raised. Timer started."
         })
         threading.Thread(
             target=escalation_timer,
@@ -495,7 +430,6 @@ def process_frame():
     })
 
 
-# ---------------- ACK ----------------
 @app.route("/api/v1/acknowledge", methods=["GET", "POST"])
 def acknowledge_alert():
     data = request.get_json(force=True, silent=True) or {}
@@ -507,13 +441,10 @@ def acknowledge_alert():
             alert["speak_until_ts"] = 0
             alert["processing_locked"] = False
             alert["lock_until_ts"] = 0
-            app.logger.info(f"[ACK] Alert {aid} RESOLVED. Locks cleared.")
-        else:
-            app.logger.warning(f"[ACK] Unknown alert_id {aid}")
+            app.logger.info(f"[ACK] Alert {aid} RESOLVED.")
     return jsonify({"status": "SUCCESS"})
 
 
-# ---------------- STATE ----------------
 @app.route("/api/v1/state", methods=["GET", "POST"])
 def get_state():
     with alerts_lock:
