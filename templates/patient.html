@@ -73,6 +73,7 @@
     let activeStream = null;
     let activeCamera = null;
     let speakerLoop = null;
+    let currentAlertId = null;
 
 
 
@@ -177,13 +178,17 @@
 
     async function stopSpeaker() {
       try {
-        await fetch("/api/v1/stop-speaker", { method: "POST" });
+        await fetch("/api/v1/stop-speaker", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ alert_id: currentAlertId })
+        });
       } catch (e) {}
       if (speakerLoop) { clearInterval(speakerLoop); speakerLoop = null; }
       window.speechSynthesis.cancel();
       speakerStopBtn.style.display = "none";
       setStatus("");
-      log("🔕 STOP pressed. Signal silenced.");
+      log("🔕 STOP pressed. Caregiver attended.");
     }
 
     async function dispatchEvent(gestureName) {
@@ -208,6 +213,7 @@
         log(`Agent: ${data.assessment}`);
 
         if (data.spoken_code && data.spoken_code !== "NONE") {
+          currentAlertId = data.alert_id;
           speak(data.spoken_code);
           startSpeakerLoop(data.spoken_code);
         }
