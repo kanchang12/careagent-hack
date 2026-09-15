@@ -49,16 +49,16 @@ alerts_lock = threading.Lock()
 events_feed = []
 feed_lock = threading.Lock()
 
-# ---------- GLOBAL PROCESSING LOCK (independent of speaker) ----------
+# ---------- GLOBAL PROCESSING LOCK ----------
 LOCK = {"until": 0.0}
 lock_mutex = threading.Lock()
 
-# ---------- SPEAKER FLAG (independent, manual stop only) ----------
+# ---------- SPEAKER FLAG ----------
 SPEAKER = {"on": False, "phrase": "Emergency detected. Please stay calm. Help is coming."}
 speaker_mutex = threading.Lock()
 
-ESCALATION_CALL_AT  = 300
-PROCESSING_LOCK_SEC = 300
+PERSON_DETECTION_TIMEOUT = 180
+CONTINUOUS_GESTURE_LIMIT = 3
 
 app.logger.info("=" * 60)
 app.logger.info("[BOOT] Care Agent starting")
@@ -111,7 +111,7 @@ def speaker_off():
     app.logger.info("[SPEAKER] OFF (manual stop).")
 
 
-# ---------------- TOOLS ----------------
+# ---------- TOOLS ----------
 def tool_send_whatsapp(message):
     token = os.getenv("META_WHATSAPP_TOKEN")
     phone_id = os.getenv("META_PHONE_NUMBER_ID")
@@ -155,22 +155,6 @@ def tool_send_voice_call(reason):
         return False
 
 
-def tool_get_jamendo_music():
-    client_id = os.getenv("JAMENDO_CLIENT_ID")
-    fallback = "https://prod-1.storage.jamendo.com/?trackid=1890757&format=mp31"
-    if not client_id:
-        return fallback
-    try:
-        url = f"https://api.jamendo.com/v3.0/tracks/?client_id={client_id}&format=json&tags=ambient,relaxing&limit=1"
-        r = requests.get(url, timeout=5)
-        data = r.json()
-        if data.get("results"):
-            return data["results"][0]["audio"]
-        return fallback
-    except Exception:
-        return fallback
-
-
 def tool_send_to_webhook(alert_id, gesture, assessment, raw_b64):
     webhook_url = os.getenv("MAKE_WEBHOOK_URL")
     if not webhook_url:
@@ -193,38 +177,127 @@ def tool_send_to_webhook(alert_id, gesture, assessment, raw_b64):
         return False
 
 
-# ---------------- ESCALATION (for non-emergency 5 min call) ----------------
-def escalation_timer(alert_id, message, is_emergency):
-    start = time.time()
-    call_sent = is_emergency
-    app.logger.info(f"[ESCALATION {alert_id}] started. emergency={is_emergency}")
+def detect_person_in_frame(image_bytes):
+    """
+    Uses Gemini vision to detect if a caregiver/person is present in frame.
+    Returns True if person detected, False otherwise.
+    """
+    if not ai_client:
+        return False
+    try:
+        prompt = (
+            "Look at this image of an elderly patient. "
+            "Is there another person (caregiver, family member, visitor) visible in the frame? "
+            "Answer ONLY 'YES' or 'NO'."
+        )
+        chat = ai_client.chats.create(
+            model=GEMINI_MODEL,
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                max_output_tokens=10,
+            ),
+        )
+        response = chat.send_message(
+            [types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"), prompt]
+        )
+        answer = (response.text or "").strip().upper()
+        detected = "YES" in answer
+        app.logger.info(f"[PERSON_DETECT] {answer} → {detected}")
+        return detected
+    except Exception as e:
+        app.logger.error(f"[PERSON_DETECT Error] {e}")
+        return False
+
+
+# ---------- ESCALATION WITH PERSON DETECTION ----------
+def escalation_monitor(alert_id, gesture_type, spoken_phrase):
+    """
+    Monitor for 3 minutes.
+    - If person appears in frame within 3 min: drop alert.
+    - If person never appears: call after 3 min.
+    - If person appears but patient gestures again 3+ times continuously: call.
+    """
+    start_time = time.time()
+    person_appeared = False
+    gesture_count = 0
+
+    app.logger.info(f"[ESCALATION {alert_id}] started. Watching for {PERSON_DETECTION_TIMEOUT}s")
 
     while True:
-        time.sleep(1)
-        elapsed = time.time() - start
+        time.sleep(5)
+        elapsed = time.time() - start_time
 
         with alerts_lock:
             alert = alerts.get(alert_id)
             if not alert:
+                app.logger.info(f"[ESCALATION {alert_id}] alert cleared externally.")
                 return
 
-        if (not is_emergency) and (not call_sent) and elapsed >= ESCALATION_CALL_AT:
-            call_sent = True
-            app.logger.info(f"[ESCALATION {alert_id}] 5 min → placing call")
-            ok = tool_send_voice_call(f"Unresolved request: {message}")
+        # Timeout: if 3 min passed and no person, call and send WhatsApp
+        if elapsed >= PERSON_DETECTION_TIMEOUT and not person_appeared:
+            app.logger.info(f"[ESCALATION {alert_id}] 3 min timeout, no person. Calling.")
+            ok = tool_send_voice_call(spoken_phrase)
+            ok_wa = tool_send_whatsapp(spoken_phrase)
             push_feed({
                 "time": datetime.utcnow().strftime("%H:%M:%S"),
                 "type": "Twilio Voice",
-                "message": f"Voice call {'dispatched' if ok else 'FAILED'} at 5 min."
+                "message": f"3-min timeout call {'dispatched' if ok else 'FAILED'}."
+            })
+            push_feed({
+                "time": datetime.utcnow().strftime("%H:%M:%S"),
+                "type": "Meta WhatsApp",
+                "message": f"WhatsApp alert {'sent' if ok_wa else 'FAILED'} at 3-min timeout."
             })
             return
 
-        if elapsed >= ESCALATION_CALL_AT:
-            app.logger.info(f"[ESCALATION {alert_id}] 5 min elapsed. Done.")
+        # If person appeared, check gesture count
+        if person_appeared and gesture_count >= CONTINUOUS_GESTURE_LIMIT:
+            app.logger.info(f"[ESCALATION {alert_id}] person present but {gesture_count} gestures. Calling.")
+            ok = tool_send_voice_call(spoken_phrase)
+            ok_wa = tool_send_whatsapp(spoken_phrase)
+            push_feed({
+                "time": datetime.utcnow().strftime("%H:%M:%S"),
+                "type": "Twilio Voice",
+                "message": f"Persistent gesture call {'dispatched' if ok else 'FAILED'}."
+            })
+            push_feed({
+                "time": datetime.utcnow().strftime("%H:%M:%S"),
+                "type": "Meta WhatsApp",
+                "message": f"WhatsApp alert {'sent' if ok_wa else 'FAILED'} after persistent gestures."
+            })
             return
 
 
-# ---------------- VIEWS ----------------
+def detect_person_and_update(alert_id, image_bytes):
+    """
+    Called each frame. If person detected, set person_appeared flag.
+    """
+    with alerts_lock:
+        alert = alerts.get(alert_id)
+        if not alert:
+            return
+
+        if not alert.get("person_appeared"):
+            if detect_person_in_frame(image_bytes):
+                alert["person_appeared"] = True
+                app.logger.info(f"[{alert_id}] Person detected in frame. Escalation cancels if no more gestures.")
+                push_feed({
+                    "time": datetime.utcnow().strftime("%H:%M:%S"),
+                    "type": "Person Detection",
+                    "message": "Caregiver/visitor detected in frame."
+                })
+
+
+def log_gesture_for_alert(alert_id):
+    """Track consecutive gestures after person appears."""
+    with alerts_lock:
+        alert = alerts.get(alert_id)
+        if alert and alert.get("person_appeared"):
+            alert["consecutive_gestures"] = alert.get("consecutive_gestures", 0) + 1
+            app.logger.info(f"[{alert_id}] Gesture count: {alert['consecutive_gestures']}")
+
+
+# ---------- VIEWS ----------
 @app.route("/", methods=["GET", "POST"])
 def patient_view():
     return render_template("patient.html")
@@ -234,10 +307,9 @@ def uploaded_file(filename):
     return send_from_directory(UPLOAD_DIR, filename)
 
 
-# ---------------- SPEAKER LOOP ENDPOINT ----------------
+# ---------- SPEAKER LOOP ENDPOINT ----------
 @app.route("/api/v1/patient-loop", methods=["GET", "POST"])
 def patient_loop():
-    # Returns ON until manually stopped via /api/v1/stop-speaker
     if speaker_is_on():
         with speaker_mutex:
             phrase = SPEAKER["phrase"]
@@ -248,7 +320,7 @@ def patient_loop():
 @app.route("/api/v1/stop-speaker", methods=["GET", "POST"])
 def stop_speaker():
     speaker_off()
-    lock_off()  # stop button also releases the processing lock
+    lock_off()
     push_feed({
         "time": datetime.utcnow().strftime("%H:%M:%S"),
         "type": "Patient",
@@ -257,10 +329,9 @@ def stop_speaker():
     return jsonify({"status": "STOPPED"})
 
 
-# ---------------- MAIN FRAME PROCESSOR ----------------
+# ---------- MAIN FRAME PROCESSOR ----------
 @app.route("/api/v1/process-frame", methods=["GET", "POST"])
 def process_frame():
-    # HARD GATE — if locked, do nothing else
     if lock_is_on():
         remaining = lock_remaining()
         app.logger.info(f"[FRAME] BLOCKED — {remaining}s left.")
@@ -269,7 +340,6 @@ def process_frame():
             "remaining": remaining,
             "assessment": f"Processing paused. {remaining}s left.",
             "spoken_code": "NONE",
-            "play_music_url": None,
             "alert_id": None
         }), 200
 
@@ -294,87 +364,29 @@ def process_frame():
         app.logger.error(f"[FRAME] Image save failed: {e}")
         return jsonify({"error": f"Image decode failed: {e}"}), 400
 
-    prompt = (
-        f"You are an autonomous Care Agent evaluating an elderly patient.\n"
-        f"A local edge model guessed the gesture is: '{gesture_input}'. DO NOT TRUST IT BLINDLY.\n"
-        f"Look closely at the patient's hand in the image. If YOU see 1 finger, 2 fingers, 3 fingers, or a closed fist, your vision overrides the edge model.\n"
-        f"Based on your visual assessment:\n"
-        f"- If YOU see a FIST or a fall: execute voice_call, whatsapp, and comfort_music.\n"
-        f"- If YOU see 1, 2, or 3 fingers: execute whatsapp, NO voice_call, NO music.\n"
-        f"- If YOU see no gestures and the patient is safe: execute nothing.\n\n"
-        f"Return ONLY valid JSON matching this schema:\n"
-        "{\n"
-        '  "assessment": "<factual description>",\n'
-        '  "tools_to_execute": {\n'
-        '    "whatsapp_alert": {"execute": true|false, "message": "<short text>"},\n'
-        '    "voice_call": {"execute": true|false, "reason": "<urgency reason>"},\n'
-        '    "comfort_music": {"execute": true|false}\n'
-        '  },\n'
-        '  "spoken_code": "CONFIRM_WATER" | "CONFIRM_FOOD" | "CONFIRM_TOILET" | "EMERGENCY_DISPATCHED" | "COMFORT_WAITING" | "NONE"\n'
-        "}"
-    )
+    # Determine if alert needed
+    is_alert = gesture_input in ["WATER", "FOOD", "TOILET"]
+    is_emergency = gesture_input == "FIST"
 
-    plan = {
-        "assessment": f"Fallback. Gesture: {gesture_input}",
-        "tools_to_execute": {
-            "whatsapp_alert": {"execute": (gesture_input != "NONE"), "message": f"{gesture_input} requested."},
-            "voice_call": {"execute": False, "reason": ""},
-            "comfort_music": {"execute": False}
-        },
-        "spoken_code": "NONE"
-    }
+    spoken_code = "NONE"
+    assessment = f"No action. Gesture: {gesture_input}"
 
-    if ai_client:
-        try:
-            app.logger.info(f"[{alert_id}] Requesting Gemini...")
-            t0 = time.time()
-            chat = ai_client.chats.create(
-                model=GEMINI_MODEL,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.0,
-                    max_output_tokens=1200,
-                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-                ),
-            )
-            response = chat.send_message(
-                [types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"), prompt]
-            )
-            raw_text = (response.text or "").strip()
-            app.logger.info(f"[{alert_id}] Gemini in {time.time()-t0:.1f}s")
-            parsed = None
-            try:
-                parsed = json.loads(raw_text)
-            except json.JSONDecodeError:
-                first = raw_text.find("{")
-                last = raw_text.rfind("}")
-                if first != -1 and last > first:
-                    try:
-                        parsed = json.loads(raw_text[first:last + 1])
-                    except json.JSONDecodeError:
-                        pass
-            if isinstance(parsed, dict) and parsed:
-                plan.update(parsed)
-        except Exception as e:
-            app.logger.error(f"[Gemini Error] {type(e).__name__}: {e}")
-            app.logger.error(traceback.format_exc())
+    if gesture_input == "WATER":
+        assessment = "Patient is asking for water."
+        spoken_code = "He is asking for water, please attend."
+    elif gesture_input == "FOOD":
+        assessment = "Patient is asking for food."
+        spoken_code = "He is asking for food, please attend."
+    elif gesture_input == "TOILET":
+        assessment = "Patient is asking for toilet assistance."
+        spoken_code = "He needs toilet assistance, please attend."
+    elif gesture_input == "FIST":
+        assessment = "Emergency: Patient in distress."
+        spoken_code = "Emergency detected. Help is coming immediately."
+        is_alert = True
+        is_emergency = True
 
-    if gesture_input == "FIST":
-        app.logger.info(f"[{alert_id}] FIST override.")
-        plan["assessment"] = "Emergency fist gesture."
-        plan["tools_to_execute"] = {
-            "whatsapp_alert": {"execute": True, "message": "CRITICAL: Emergency fist gesture."},
-            "voice_call": {"execute": True, "reason": "Emergency fist gesture detected."},
-            "comfort_music": {"execute": True}
-        }
-        plan["spoken_code"] = "EMERGENCY_DISPATCHED"
-
-    tools = plan.get("tools_to_execute", {})
-    is_emergency = bool(tools.get("voice_call", {}).get("execute", False))
-    wants_whatsapp = bool(tools.get("whatsapp_alert", {}).get("execute", False))
-
-    status = "ESCALATED" if is_emergency else ("PENDING" if wants_whatsapp else "RESOLVED")
-    any_alert = is_emergency or wants_whatsapp
+    status = "ESCALATED" if is_alert else "RESOLVED"
 
     with alerts_lock:
         alerts[alert_id] = {
@@ -382,67 +394,79 @@ def process_frame():
             "created_at": datetime.utcnow().isoformat(),
             "gesture": gesture_input,
             "status": status,
-            "assessment": plan.get("assessment", ""),
-            "image": f"/uploads/{fname}"
+            "assessment": assessment,
+            "image": f"/uploads/{fname}",
+            "person_appeared": False,
+            "consecutive_gestures": 0
         }
 
-    if any_alert:
-        # Turn on the global processing lock for 5 minutes
-        lock_on(PROCESSING_LOCK_SEC)
-        # Turn on the speaker — it stays on until patient presses STOP
-        speaker_on("Emergency detected. Please stay calm. Help is coming.")
-        app.logger.info(f"[{alert_id}] EVENT RAISED — emergency={is_emergency}. Lock ON, Speaker ON.")
+    # WhatsApp only on emergency (immediate) or escalation (later)
+    # For routine requests, wait for escalation logic
 
+    # Immediate call for emergency
     if is_emergency:
-        reason = tools.get("voice_call", {}).get("reason", "Critical alert.")
-        ok_call = tool_send_voice_call(reason)
+        ok_call = tool_send_voice_call(assessment)
         push_feed({
             "time": datetime.utcnow().strftime("%H:%M:%S"),
             "type": "Twilio Voice",
             "message": f"Emergency call {'dispatched' if ok_call else 'FAILED'} immediately."
         })
-        msg = tools.get("whatsapp_alert", {}).get("message", "Critical alert.")
-        ok_wa = tool_send_whatsapp(msg)
-        push_feed({
-            "time": datetime.utcnow().strftime("%H:%M:%S"),
-            "type": "Meta WhatsApp",
-            "message": f"Emergency WhatsApp {'sent' if ok_wa else 'FAILED'} immediately."
-        })
 
-    elif wants_whatsapp:
-        msg = tools.get("whatsapp_alert", {}).get("message", "Patient needs attention.")
-        ok_wa = tool_send_whatsapp(msg)
-        push_feed({
-            "time": datetime.utcnow().strftime("%H:%M:%S"),
-            "type": "Meta WhatsApp",
-            "message": f"WhatsApp {'sent' if ok_wa else 'FAILED'} immediately."
-        })
+    # Turn on speaker and lock for any alert
+    if is_alert:
+        lock_on(30)  # 30s lock between frames
+        speaker_on(spoken_code)  # Use the specific phrase (water/food/toilet/emergency)
+        app.logger.info(f"[{alert_id}] ALERT — emergency={is_emergency}. Lock ON, Speaker ON.")
 
-    if any_alert:
+    # Back up to webhook
+    if gesture_input != "NONE":
+        tool_send_to_webhook(alert_id, gesture_input, assessment, raw_b64)
+        push_feed({"time": datetime.utcnow().strftime("%H:%M:%S"), "type": "Make.com", "message": "Backed up to G-Drive."})
+
+    # Start escalation monitor in background (non-emergency only)
+    if is_alert and not is_emergency:
         threading.Thread(
-            target=escalation_timer,
-            args=(alert_id, tools.get("whatsapp_alert", {}).get("message", "Patient needs attention."), is_emergency),
+            target=escalation_monitor,
+            args=(alert_id, gesture_input, spoken_code),
             daemon=True
         ).start()
-
-    music_url = tool_get_jamendo_music() if tools.get("comfort_music", {}).get("execute", False) else None
-    if music_url:
-        push_feed({"time": datetime.utcnow().strftime("%H:%M:%S"), "type": "Jamendo API", "message": "Comfort Music Deployed."})
-
-    if gesture_input != "NONE":
-        tool_send_to_webhook(alert_id, gesture_input, plan.get("assessment", ""), raw_b64)
-        push_feed({"time": datetime.utcnow().strftime("%H:%M:%S"), "type": "Make.com", "message": "Backed up to G-Drive."})
+        # Start person detection thread
+        threading.Thread(
+            target=person_detection_thread,
+            args=(alert_id, image_bytes),
+            daemon=True
+        ).start()
 
     if status == "RESOLVED":
         push_feed({"time": datetime.utcnow().strftime("%H:%M:%S"), "type": "WATCHDOG", "message": "Routine check safe."})
 
     return jsonify({
         "alert_id": alert_id,
-        "assessment": plan.get("assessment"),
-        "spoken_code": plan.get("spoken_code", "NONE"),
-        "play_music_url": music_url,
+        "assessment": assessment,
+        "spoken_code": spoken_code,
         "locked": False
     })
+
+
+def person_detection_thread(alert_id, initial_image_bytes):
+    """
+    Periodically check frames for person presence over 3 minutes.
+    """
+    start_time = time.time()
+    while True:
+        time.sleep(10)
+        elapsed = time.time() - start_time
+
+        with alerts_lock:
+            alert = alerts.get(alert_id)
+            if not alert:
+                return
+
+        if elapsed >= PERSON_DETECTION_TIMEOUT:
+            return
+
+        if not alert.get("person_appeared"):
+            detect_person_and_update(alert_id, initial_image_bytes)
 
 
 @app.route("/api/v1/state", methods=["GET", "POST"])
