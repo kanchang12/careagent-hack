@@ -319,14 +319,32 @@ def patient_loop():
 
 @app.route("/api/v1/stop-speaker", methods=["GET", "POST"])
 def stop_speaker():
+    data = request.get_json(force=True, silent=True) or {}
+    alert_id = data.get("alert_id")
+    
     speaker_off()
     lock_off()
+    
+    # STOP button cancels the alert completely — no call, no WhatsApp
+    if alert_id:
+        with alerts_lock:
+            alert = alerts.get(alert_id)
+            if alert:
+                alert["status"] = "RESOLVED"
+                app.logger.info(f"[{alert_id}] STOP pressed. Alert cancelled.")
+                push_feed({
+                    "time": datetime.utcnow().strftime("%H:%M:%S"),
+                    "type": "Patient",
+                    "message": "STOP pressed. Alert cancelled — no escalation."
+                })
+                return jsonify({"status": "STOPPED", "alert_cancelled": True})
+    
     push_feed({
         "time": datetime.utcnow().strftime("%H:%M:%S"),
         "type": "Patient",
-        "message": "STOP pressed. Speaker + lock cleared."
+        "message": "STOP pressed."
     })
-    return jsonify({"status": "STOPPED"})
+    return jsonify({"status": "STOPPED", "alert_cancelled": False})
 
 
 # ---------- MAIN FRAME PROCESSOR ----------
