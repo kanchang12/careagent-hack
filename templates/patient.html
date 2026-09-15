@@ -5,32 +5,57 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Care Agent — Patient Terminal</title>
   <style>
-    body { background: #0f172a; color: #fff; font-family: sans-serif; text-align: center; margin: 0; padding: 20px; }
-    .camera-box { width: 100%; max-width: 480px; height: 360px; background: #000; border: 3px solid #334155; border-radius: 12px; margin: 0 auto 20px; position: relative; overflow: hidden; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #f5f5f5; color: #222; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-align: center; padding: 20px; }
+    .container { max-width: 600px; margin: 0 auto; }
+    h2 { margin-bottom: 10px; font-size: 1.8rem; color: #1a1a1a; }
+    .subtitle { color: #666; margin-bottom: 20px; font-size: 0.95rem; }
+    .camera-box { width: 100%; max-width: 480px; height: 360px; background: #000; border: 3px solid #ddd; border-radius: 12px; margin: 0 auto 20px; position: relative; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
     video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
-    .btn { padding: 16px 24px; font-size: 1.2rem; font-weight: bold; background: #2563eb; color: #fff; border: none; border-radius: 8px; cursor: pointer; margin: 5px; }
-    .btn-danger { background: #ef4444; }
-    .btn-stop { background: #dc2626; display: none; margin-top: 20px; font-size: 1.4rem; padding: 20px 40px; }
-    #log { font-family: monospace; color: #38bdf8; margin-top: 20px; font-size: 0.9rem; }
-    .status { font-size: 1.1rem; margin-top: 10px; color: #fbbf24; font-weight: bold; }
+    .info-box { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 15px; margin-bottom: 20px; font-size: 0.95rem; color: #555; }
+    .gestures { font-weight: 600; color: #333; margin-bottom: 5px; }
+    .gesture-key { display: inline-block; background: #f0f0f0; padding: 4px 8px; border-radius: 4px; margin: 3px; font-size: 0.9rem; }
+    .btn { padding: 14px 20px; font-size: 1rem; font-weight: 600; border: none; border-radius: 8px; cursor: pointer; margin: 5px; transition: all 0.2s; }
+    .btn-primary { background: #2563eb; color: white; }
+    .btn-primary:hover { background: #1d4ed8; box-shadow: 0 2px 6px rgba(37,99,235,0.3); }
+    .btn-primary:disabled { background: #cbd5e1; cursor: not-allowed; }
+    .btn-stop { background: #dc2626; color: white; display: none; margin-top: 20px; font-size: 1.1rem; padding: 16px 32px; }
+    .btn-stop:hover { background: #b91c1c; }
+    #log { font-family: "Monaco", "Courier New", monospace; color: #0066cc; background: #f9f9f9; border: 1px solid #ddd; border-radius: 6px; padding: 12px; margin-top: 20px; font-size: 0.85rem; max-height: 200px; overflow-y: auto; text-align: left; line-height: 1.4; }
+    .status { font-size: 1rem; margin-top: 12px; color: #d97706; font-weight: 600; }
+    .status-ok { color: #059669; }
+    .status-error { color: #dc2626; }
+    .button-group { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 10px; }
   </style>
 </head>
 <body>
 
-  <h2>🛡️ Care Guardian Edge</h2>
+  <div class="container">
+    <h2>🛡️ Care Guardian Edge</h2>
+    <p class="subtitle">Elderly patient monitoring with gesture recognition</p>
 
-  <div class="camera-box"><video id="videoFeed" autoplay playsinline muted></video></div>
-  <p>Gestures: 1=Water | 2=Food | 3=Toilet | Fist=EMERGENCY</p>
-  <div class="status" id="statusBox"></div>
+    <div class="camera-box"><video id="videoFeed" autoplay playsinline muted></video></div>
 
-  <button class="btn" id="startBtn" onclick="initSystem()">Initialize Agent</button>
-  <button class="btn btn-danger" id="stopBtn" onclick="stopSystem()" style="display: none;">Stop Agent</button>
+    <div class="info-box">
+      <div class="gestures">Gesture codes:</div>
+      <span class="gesture-key">1 finger = Water</span>
+      <span class="gesture-key">2 fingers = Food</span>
+      <span class="gesture-key">3 fingers = Toilet</span>
+      <span class="gesture-key">Fist = Emergency</span>
+    </div>
 
-  <!-- STOP SIGNAL — only visible when speaker is active -->
-  <button class="btn btn-stop" id="speakerStopBtn" onclick="stopSpeaker()">🔕 STOP EMERGENCY SIGNAL</button>
+    <div class="status" id="statusBox"></div>
 
-  <div id="log">Waiting to start...</div>
-  <audio id="comfortAudio" loop></audio>
+    <div class="button-group">
+      <button class="btn btn-primary" id="startBtn" onclick="initSystem()">Initialize Agent</button>
+      <button class="btn btn-primary" id="stopBtn" onclick="stopSystem()" style="display: none;">Stop Agent</button>
+    </div>
+
+    <!-- STOP SIGNAL — only visible when speaker is active -->
+    <button class="btn btn-stop" id="speakerStopBtn" onclick="stopSpeaker()">🔕 STOP ALERT SIGNAL</button>
+
+    <div id="log">Waiting to start...</div>
+  </div>
 
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js" crossorigin="anonymous"></script>
@@ -39,7 +64,6 @@
     const video = document.getElementById('videoFeed');
     const logBox = document.getElementById('log');
     const statusBox = document.getElementById('statusBox');
-    const comfortAudio = document.getElementById('comfortAudio');
     const speakerStopBtn = document.getElementById('speakerStopBtn');
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
@@ -50,16 +74,21 @@
     let activeCamera = null;
     let speakerLoop = null;
 
-    const VOCAB = {
-      "CONFIRM_WATER": "Noted. Your family has been alerted for water.",
-      "CONFIRM_FOOD": "Noted. Your family has been alerted for food.",
-      "CONFIRM_TOILET": "Noted. Assistance for the toilet is requested.",
-      "EMERGENCY_DISPATCHED": "Emergency detected. I am calling your family right now.",
-      "COMFORT_WAITING": "Help is on the way. Just breathe."
-    };
 
-    function log(msg) { logBox.innerHTML = `[${new Date().toLocaleTimeString()}] ${msg}<br>` + logBox.innerHTML; }
-    function setStatus(msg) { statusBox.textContent = msg; }
+
+    function log(msg) {
+      logBox.innerHTML = `[${new Date().toLocaleTimeString()}] ${msg}<br>` + logBox.innerHTML;
+    }
+
+    function setStatus(msg) {
+      statusBox.textContent = msg;
+      statusBox.className = "status";
+      if (msg.includes("Running") || msg.includes("Ready")) {
+        statusBox.classList.add("status-ok");
+      } else if (msg.includes("Error") || msg.includes("STOP")) {
+        statusBox.classList.add("status-error");
+      }
+    }
 
     function speak(phrase) {
       if (!window.speechSynthesis) return;
@@ -68,7 +97,6 @@
     }
 
     async function initSystem() {
-      // Unlock speech inside the user gesture
       try {
         const u = new SpeechSynthesisUtterance(" ");
         u.volume = 0;
@@ -77,6 +105,7 @@
 
       document.getElementById('startBtn').style.display = "none";
       document.getElementById('stopBtn').style.display = "inline-block";
+      setStatus("Starting camera...");
       log("Starting camera...");
 
       try {
@@ -93,12 +122,14 @@
 
         log("Camera ready. Initialising MediaPipe...");
         await initMediaPipe();
+        setStatus("✓ Running. Show gestures to the camera.");
 
         watchdogInterval = setInterval(() => {
           if (!isLocked) dispatchEvent("NONE");
         }, 8000);
       } catch (e) {
-        log("Camera Error: " + e.message);
+        log("❌ Camera Error: " + e.message);
+        setStatus("Camera access denied.");
       }
     }
 
@@ -108,8 +139,6 @@
       if (activeCamera) activeCamera.stop();
       if (activeStream) activeStream.getTracks().forEach(t => t.stop());
       video.srcObject = null;
-      comfortAudio.pause();
-      comfortAudio.currentTime = 0;
       window.speechSynthesis.cancel();
       isLocked = false;
       speakerStopBtn.style.display = "none";
@@ -120,12 +149,10 @@
     }
 
     // ---------- SPEAKER LOOP ----------
-    // Runs every 20s and only stops when the server says speaker is OFF
-    // (which happens when the patient presses STOP).
-    function startSpeakerLoop() {
+    function startSpeakerLoop(phrase) {
       if (speakerLoop) return;
-      log("🔊 Speaker loop ON — repeating every 20s until STOP.");
-      setStatus("🚨 Emergency — press STOP when help arrives");
+      log(`🔊 Speaker ON — repeating every 20s: "${phrase}"`);
+      setStatus("🚨 Alert active — press STOP when help arrives");
       speakerStopBtn.style.display = "inline-block";
 
       const tick = async () => {
@@ -133,10 +160,10 @@
           const r = await fetch("/api/v1/patient-loop");
           const d = await r.json();
           if (d.speak) {
-            speak(d.phrase);
-            log(`🔊 "${d.phrase}"`);
+            speak(phrase);
+            log(`🔊 "${phrase}"`);
           } else {
-            log("🔕 Speaker stopped.");
+            log("🔕 Speaker stopped by patient.");
             setStatus("");
             speakerStopBtn.style.display = "none";
             if (speakerLoop) { clearInterval(speakerLoop); speakerLoop = null; }
@@ -167,33 +194,26 @@
 
       try {
         const res = await fetch("/api/v1/process-frame", {
-          method: "POST", headers: { "Content-Type": "application/json" },
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ gesture: gestureName, snapshot: b64 })
         });
         const data = await res.json();
 
         if (data.locked) {
-          log(`⏸ Server locked — ${data.remaining}s left.`);
-          setStatus(`⏸ Paused — ${data.remaining}s`);
+          log(`⏸ Server paused — ${data.remaining}s left.`);
           return;
         }
 
         log(`Agent: ${data.assessment}`);
 
-        if (data.play_music_url) {
-          comfortAudio.src = data.play_music_url;
-          comfortAudio.play().catch(e => console.log("Audio block", e));
-          log("🎵 Comfort Music.");
-        } else {
-          comfortAudio.pause();
+        if (data.spoken_code && data.spoken_code !== "NONE") {
+          speak(data.spoken_code);
+          startSpeakerLoop(data.spoken_code);
         }
-
-        if (VOCAB[data.spoken_code]) speak(VOCAB[data.spoken_code]);
-
-        if (data.alert_id && data.spoken_code && data.spoken_code !== "NONE") {
-          startSpeakerLoop();
-        }
-      } catch (err) { log("API Error"); }
+      } catch (err) {
+        log("❌ API Error");
+      }
     }
 
     // ===================== MEDIAPIPE =====================
@@ -242,7 +262,7 @@
           }
           if (count === 5 && !isLocked) {
             isLocked = true;
-            log(`🎯 Trigger: ${gesture}`);
+            log(`🎯 Detected: ${gesture}`);
             dispatchEvent(gesture);
             setTimeout(() => { isLocked = false; count = 0; }, 5000);
           }
