@@ -240,27 +240,44 @@
       let stable = null;
       let count = 0;
 
-      hands.onResults((results) => {
+hands.onResults((results) => {
         if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
           count = 0;
           return;
         }
 
         const lm = results.multiHandLandmarks[0];
-        let fingers = 0;
 
-        // Thumb check (comparing x coordinate relative to wrist/palm depending on hand orientation, or checking all 5 tips)
-        if (lm[4].x < lm[3].x) fingers++; // Basic thumb extension check
-        if (lm[8].y  < lm[6].y)  fingers++;
-        if (lm[12].y < lm[10].y) fingers++;
-        if (lm[16].y < lm[14].y) fingers++;
-        if (lm[20].y < lm[18].y) fingers++;
+        // Strict extension checks: tip must be clearly above PIP joint (smaller Y value)
+        const indexUp   = lm[8].y  < lm[6].y  - 0.04;
+        const middleUp  = lm[12].y < lm[10].y - 0.04;
+        const ringUp    = lm[16].y < lm[14].y - 0.04;
+        const pinkyUp   = lm[20].y < lm[18].y - 0.04;
+        
+        // Curled checks for fingers that must stay down
+        const indexDown  = lm[8].y  > lm[6].y;
+        const middleDown = lm[12].y > lm[10].y;
+        const ringDown   = lm[16].y > lm[14].y;
+        const pinkyDown  = lm[20].y > lm[18].y;
 
-        let gesture = (fingers === 1) ? "WATER"
-                    : (fingers === 2) ? "FOOD"
-                    : (fingers === 3) ? "TOILET"
-                    : (fingers >= 5) ? "FIVE"
-                    : "NONE";
+        let gesture = "NONE";
+
+        // WATER: Strictly ONLY index finger up, others curled down
+        if (indexUp && middleDown && ringDown && pinkyDown) {
+          gesture = "WATER";
+        }
+        // FOOD: Strictly Index and Middle up, others curled down
+        else if (indexUp && middleUp && ringDown && pinkyDown) {
+          gesture = "FOOD";
+        }
+        // TOILET: Strictly Index, Middle, and Ring up, pinky curled down
+        else if (indexUp && middleUp && ringUp && pinkyDown) {
+          gesture = "TOILET";
+        }
+        // FIVE: All 4 fingers up
+        else if (indexUp && middleUp && ringUp && pinkyUp) {
+          gesture = "FIVE";
+        }
 
         if (gesture !== "NONE") {
           if (stable === gesture) {
