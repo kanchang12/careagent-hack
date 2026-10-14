@@ -35,7 +35,7 @@ UPLOAD_DIR = Path("static/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 TWILIO_SID     = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_TOKEN   = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_FROM    = os.getenv("TWILIO_VOICE_FROM")
