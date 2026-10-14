@@ -36,12 +36,13 @@
 
     <div class="camera-box"><video id="videoFeed" autoplay playsinline muted></video></div>
 
-    <div class="info-box">
+  <div class="info-box">
       <div class="gestures">Gesture codes:</div>
       <span class="gesture-key">1 finger = Water</span>
       <span class="gesture-key">2 fingers = Food</span>
       <span class="gesture-key">3 fingers = Toilet</span>
-      <span class="gesture-key">Fist = Emergency</span>
+      <span class="gesture-key">5 fingers = Emergency</span>
+      <span class="gesture-key">4 rapid blinks = Emergency</span>
     </div>
 
     <div class="status" id="statusBox"></div>
@@ -248,15 +249,17 @@
         const lm = results.multiHandLandmarks[0];
         let fingers = 0;
 
+        // Thumb check (comparing x coordinate relative to wrist/palm depending on hand orientation, or checking all 5 tips)
+        if (lm[4].x < lm[3].x) fingers++; // Basic thumb extension check
         if (lm[8].y  < lm[6].y)  fingers++;
         if (lm[12].y < lm[10].y) fingers++;
         if (lm[16].y < lm[14].y) fingers++;
         if (lm[20].y < lm[18].y) fingers++;
 
-        let gesture = (fingers === 0) ? "FIST"
-                    : (fingers === 1) ? "WATER"
+        let gesture = (fingers === 1) ? "WATER"
                     : (fingers === 2) ? "FOOD"
                     : (fingers === 3) ? "TOILET"
+                    : (fingers >= 5) ? "FIVE"
                     : "NONE";
 
         if (gesture !== "NONE") {
