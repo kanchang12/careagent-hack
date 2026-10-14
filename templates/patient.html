@@ -237,8 +237,10 @@
         minTrackingConfidence: 0.5,
       });
 
-      let stable = null;
-      let count = 0;
+  let stable = null;
+  let holdStarted = null;
+  let emergencyArmed = false;
+  let emergencyArmedUntil = 0;
 
 hands.onResults((results) => {
         if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
@@ -278,7 +280,7 @@ hands.onResults((results) => {
         else if (indexUp && middleUp && ringUp && pinkyUp) {
           gesture = "FIVE";
         }
-
+const now = performance.now();
         if (gesture !== "NONE") {
           if (stable === gesture) {
             count++;
@@ -286,12 +288,35 @@ hands.onResults((results) => {
             stable = gesture;
             count = 1;
           }
-          if (count === 5 && !isLocked) {
-            isLocked = true;
-            log(`🎯 Detected: ${gesture}`);
-            dispatchEvent(gesture);
-            setTimeout(() => { isLocked = false; count = 0; }, 5000);
-          }
+if (now - holdStarted >= 2000 && !isLocked) {
+  stable = null;
+  holdStarted = null;
+
+  if (gesture === "FIVE") {
+    if (!emergencyArmed) {
+      emergencyArmed = true;
+      emergencyArmedUntil = now + 10000;
+
+      log("Emergency candidate. Lower your hand, then show it again to confirm.");
+      speak("To confirm help, lower your hand, then show your open hand again.");
+      return;
+    }
+
+    emergencyArmed = false;
+    emergencyArmedUntil = 0;
+
+    isLocked = true;
+    log("Emergency confirmed.");
+    dispatchEvent("FIST");
+    setTimeout(() => { isLocked = false; }, 5000);
+    return;
+  }
+
+  isLocked = true;
+  log(`🎯 Detected: ${gesture}`);
+  dispatchEvent(gesture);
+  setTimeout(() => { isLocked = false; }, 5000);
+}
         } else {
           count = 0;
         }
