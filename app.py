@@ -384,7 +384,7 @@ def process_frame():
 
     # Determine if alert needed
     is_alert = gesture_input in ["WATER", "FOOD", "TOILET"]
-    is_emergency = gesture_input == "FIST"
+    is_emergency = gesture_input in ["FIVE", "BLINK"]
 
     spoken_code = "NONE"
     assessment = f"No action. Gesture: {gesture_input}"
@@ -398,9 +398,14 @@ def process_frame():
     elif gesture_input == "TOILET":
         assessment = "Patient is asking for toilet assistance."
         spoken_code = "He needs toilet assistance, please attend."
-    elif gesture_input == "FIST":
-        assessment = "Emergency: Patient in distress."
-        spoken_code = "Emergency detected. Help is coming immediately."
+    elif gesture_input == "FIVE":
+        assessment = "Emergency: Patient showing 5 fingers in distress."
+        spoken_code = "Emergency detected via hand signal. Help is coming immediately."
+        is_alert = True
+        is_emergency = True
+    elif gesture_input == "BLINK":
+        assessment = "Emergency: Rapid eye blinks detected."
+        spoken_code = "Emergency detected via rapid eye movement. Help is coming immediately."
         is_alert = True
         is_emergency = True
 
