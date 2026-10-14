@@ -368,6 +368,17 @@ def process_frame():
     data = request.get_json(force=True, silent=True) or {}
     snapshot_b64 = data.get("snapshot")
     gesture_input = data.get("gesture", "NONE").upper()
+    gesture_state = str(
+    data.get("gesture_state", "CANDIDATE")
+    ).upper().strip()
+
+    if gesture_input == "FIST" and gesture_state != "CONFIRMED":
+        return jsonify({
+            "alert_id": None,
+            "assessment": "Emergency gesture not confirmed. No call made.",
+            "spoken_code": "NONE",
+            "locked": False
+        }), 200
 
     app.logger.info(f"[FRAME] Received gesture={gesture_input}")
 
