@@ -229,12 +229,24 @@ def escalation_monitor(alert_id, gesture_type, spoken_phrase):
 
         with alerts_lock:
             alert = alerts.get(alert_id)
-            if not alert:
-                app.logger.info(f"[ESCALATION {alert_id}] alert cleared externally.")
+            # CRITICAL FIX: Abort instantly if alert is missing, deleted, or resolved
+            if not alert or alert.get("status") == "RESOLVED":
+                app.logger.info(f"[ESCALATION {alert_id}] alert resolved or cancelled. Aborting escalation monitor.")
                 return
+            
+            # Sync local flags with global alert state dictionary
+            person_appeared = alert.get("person_appeared", False)
+            gesture_count = alert.get("consecutive_gestures", 0)
 
         # Timeout: if 3 min passed and no person, call and send WhatsApp
         if elapsed >= PERSON_DETECTION_TIMEOUT and not person_appeared:
+            # Final verification check right before placing the call
+            with alerts_lock:
+                final_check = alerts.get(alert_id)
+                if not final_check or final_check.get("status") == "RESOLVED":
+                    app.logger.info(f"[ESCALATION {alert_id}] resolved right before timeout call. Cancelled.")
+                    return
+
             app.logger.info(f"[ESCALATION {alert_id}] 3 min timeout, no person. Calling.")
             ok = tool_send_voice_call(spoken_phrase)
             ok_wa = tool_send_whatsapp(spoken_phrase)
@@ -252,6 +264,11 @@ def escalation_monitor(alert_id, gesture_type, spoken_phrase):
 
         # If person appeared, check gesture count
         if person_appeared and gesture_count >= CONTINUOUS_GESTURE_LIMIT:
+            with alerts_lock:
+                final_check = alerts.get(alert_id)
+                if not final_check or final_check.get("status") == "RESOLVED":
+                    return
+
             app.logger.info(f"[ESCALATION {alert_id}] person present but {gesture_count} gestures. Calling.")
             ok = tool_send_voice_call(spoken_phrase)
             ok_wa = tool_send_whatsapp(spoken_phrase)
@@ -326,18 +343,11 @@ def stop_speaker():
     lock_off()
     
     with alerts_lock:
-        # Resolve the specific alert if provided, or resolve ALL active alerts to stop background calls
-        if alert_id and alert_id in alerts:
-            alerts[alert_id]["status"] = "RESOLVED"
+        # Kill every active alert so background escalation loops abort immediately
         for aid, alt in alerts.items():
             alt["status"] = "RESOLVED"
             
-    app.logger.info("[STOP] All alerts resolved and cancelled.")
-    push_feed({
-        "time": datetime.utcnow().strftime("%H:%M:%S"),
-        "type": "Patient",
-        "message": "STOP pressed. All alerts cancelled — no escalation."
-    })
+    app.logger.info("[STOP] All alerts resolved. Background calls cancelled.")
     return jsonify({"status": "STOPPED", "alert_cancelled": True})
 
 
