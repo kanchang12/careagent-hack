@@ -325,26 +325,20 @@ def stop_speaker():
     speaker_off()
     lock_off()
     
-    # STOP button cancels the alert completely — no call, no WhatsApp
-    if alert_id:
-        with alerts_lock:
-            alert = alerts.get(alert_id)
-            if alert:
-                alert["status"] = "RESOLVED"
-                app.logger.info(f"[{alert_id}] STOP pressed. Alert cancelled.")
-                push_feed({
-                    "time": datetime.utcnow().strftime("%H:%M:%S"),
-                    "type": "Patient",
-                    "message": "STOP pressed. Alert cancelled — no escalation."
-                })
-                return jsonify({"status": "STOPPED", "alert_cancelled": True})
-    
+    with alerts_lock:
+        # Resolve the specific alert if provided, or resolve ALL active alerts to stop background calls
+        if alert_id and alert_id in alerts:
+            alerts[alert_id]["status"] = "RESOLVED"
+        for aid, alt in alerts.items():
+            alt["status"] = "RESOLVED"
+            
+    app.logger.info("[STOP] All alerts resolved and cancelled.")
     push_feed({
         "time": datetime.utcnow().strftime("%H:%M:%S"),
         "type": "Patient",
-        "message": "STOP pressed."
+        "message": "STOP pressed. All alerts cancelled — no escalation."
     })
-    return jsonify({"status": "STOPPED", "alert_cancelled": False})
+    return jsonify({"status": "STOPPED", "alert_cancelled": True})
 
 
 # ---------- MAIN FRAME PROCESSOR ----------
@@ -381,6 +375,11 @@ def process_frame():
     except Exception as e:
         app.logger.error(f"[FRAME] Image save failed: {e}")
         return jsonify({"error": f"Image decode failed: {e}"}), 400
+
+    # Strict classification: Ignore ambiguous inputs like general open hands unless it's a defined gesture
+    valid_gestures = ["WATER", "FOOD", "TOILET", "FIVE", "BLINK"]
+    if gesture_input not in valid_gestures:
+        gesture_input = "NONE"
 
     # Determine if alert needed
     is_alert = gesture_input in ["WATER", "FOOD", "TOILET"]
@@ -423,9 +422,6 @@ def process_frame():
             "consecutive_gestures": 0
         }
 
-    # WhatsApp only on emergency (immediate) or escalation (later)
-    # For routine requests, wait for escalation logic
-
     # Immediate call for emergency
     if is_emergency:
         ok_call = tool_send_voice_call(assessment)
@@ -438,7 +434,7 @@ def process_frame():
     # Turn on speaker and lock for any alert
     if is_alert:
         lock_on(30)  # 30s lock between frames
-        speaker_on(spoken_code)  # Use the specific phrase (water/food/toilet/emergency)
+        speaker_on(spoken_code)  # Use the specific phrase
         app.logger.info(f"[{alert_id}] ALERT — emergency={is_emergency}. Lock ON, Speaker ON.")
 
     # Back up to webhook
